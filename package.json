@@ -1,0 +1,23 @@
+{
+  "name": "clx",
+  "version": "0.1.0",
+  "description": "CLI API Client Generator - Interpret OpenAPI specs at runtime",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "clx": "dist/index.js"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target node",
+    "dev": "bun run src/index.ts",
+    "compile": "bun build src/index.ts --compile --outfile clx",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "yaml": "^2.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.27",
+    "typescript": "^5.9.3"
+  }
+}
