@@ -79,6 +79,11 @@ function createSymlink(apiName: string): void {
   const clxPath = getClxBinaryPath();
   const symlinkPath = path.join(binDir, apiName);
 
+  // Ensure bin directory exists
+  if (!fs.existsSync(binDir)) {
+    fs.mkdirSync(binDir, { recursive: true });
+  }
+
   // Check if symlink already exists
   if (fs.existsSync(symlinkPath)) {
     const stats = fs.lstatSync(symlinkPath);
@@ -94,14 +99,21 @@ function createSymlink(apiName: string): void {
 
   try {
     fs.symlinkSync(clxPath, symlinkPath);
-    console.log(`Created symlink: ${symlinkPath} -> ${clxPath}`);
   } catch (error: unknown) {
     if ((error as NodeJS.ErrnoException).code === 'EACCES') {
-      console.error(`Permission denied. Try running with sudo or change CLX_BIN_DIR.`);
-      console.error(`  export CLX_BIN_DIR=~/.local/bin`);
+      console.error(`Permission denied creating symlink at ${binDir}.`);
+      console.error(`Set CLX_BIN_DIR to a writable directory.`);
     } else {
       throw error;
     }
+    return;
+  }
+
+  // Check if binDir is in PATH
+  const pathDirs = (process.env.PATH || '').split(path.delimiter);
+  if (!pathDirs.includes(binDir)) {
+    console.log(`Note: Add ${binDir} to your PATH to use '${apiName}' directly.`);
+    console.log(`  export PATH="${binDir}:$PATH"`);
   }
 }
 

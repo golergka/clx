@@ -180,7 +180,7 @@ function checkBinDir(): CheckResult {
         name: 'Bin directory',
         status: 'warn',
         message: `Not writable: ${binDir}`,
-        hint: `Use sudo for install, or set CLX_BIN_DIR=~/.local/bin`,
+        hint: `Set CLX_BIN_DIR to a writable directory`,
       };
     }
 

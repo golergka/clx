@@ -22,8 +22,11 @@ export function getAuthDir(): string {
 }
 
 export function getBinDir(): string {
-  // Default to /usr/local/bin, but allow override
-  return process.env.CLX_BIN_DIR || '/usr/local/bin';
+  // Default to ~/.local/bin (user-writable), allow override via env
+  if (process.env.CLX_BIN_DIR) {
+    return process.env.CLX_BIN_DIR;
+  }
+  return path.join(os.homedir(), '.local', 'bin');
 }
 
 export function ensureConfigDirs(): void {
