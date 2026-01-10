@@ -19,18 +19,24 @@ stripe auth login
 
 ## Installation
 
+### npm (recommended)
+
+```bash
+npm install -g @clx/cli
+```
+
 ### From Source (requires Bun)
 
 ```bash
 git clone https://github.com/golergka/clx.git
 cd clx
 bun install
-bun run build
+bun run compile
 ```
 
 ### Binary Releases
 
-Coming soon - see [Releases](https://github.com/golergka/clx/releases).
+See [Releases](https://github.com/golergka/clx/releases) for pre-built binaries.
 
 ## Features
 
