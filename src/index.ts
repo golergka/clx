@@ -529,8 +529,20 @@ ${bold('Examples:')}
 
 // Main execution
 async function main(): Promise<void> {
+  // Debug: log argv to understand what's happening
+  if (process.env.CLX_DEBUG) {
+    console.error('[DEBUG] process.argv:', process.argv);
+  }
+
   const apiName = getApiName();
-  const allArgs = process.argv.slice(2);
+  let allArgs = process.argv.slice(2);
+
+  // Bun compiled binaries pass the binary name as an extra argument
+  // e.g., ["bun", "/$bunfs/root/clx", "clx", ...actual args]
+  // We need to skip it if it matches the API name
+  if (allArgs.length > 0 && allArgs[0] === apiName) {
+    allArgs = allArgs.slice(1);
+  }
 
   // Parse global options
   const { options: globalOpts, remaining: args } = parseGlobalOptions(allArgs);
