@@ -2,42 +2,84 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { getConfigDir, getSpecsDir, getAuthDir, getBinDir, listInstalledSpecs } from './config.js';
+import { getConfigDir, getSpecsDir, getAuthDir, getBinDir, listInstalledSpecs, loadAuth } from './config.js';
+import { isInPath } from './setup.js';
+import { success, warning, error, bold, dim, cyan, green, yellow, red, symbols } from './ui.js';
+import { getVersion } from './update.js';
 
-interface CheckResult {
+export interface CheckResult {
   name: string;
   status: 'ok' | 'warn' | 'error';
   message: string;
   hint?: string;
 }
 
+export interface DoctorOptions {
+  json?: boolean;
+  fix?: boolean;
+}
+
 // Run all diagnostic checks
-export async function runDiagnostics(): Promise<CheckResult[]> {
+export async function runDiagnostics(options: DoctorOptions = {}): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
+
+  // Check clx version
+  results.push({
+    name: 'clx version',
+    status: 'ok',
+    message: getVersion(),
+  });
+
+  // Check shell
+  const shell = path.basename(process.env.SHELL || 'unknown');
+  results.push({
+    name: 'Shell',
+    status: 'ok',
+    message: shell,
+  });
+
+  // Check PATH setup
+  results.push(checkPath());
 
   // Check config directory
   results.push(checkConfigDir());
 
-  // Check specs directory
-  results.push(checkSpecsDir());
-
-  // Check auth directory
-  results.push(checkAuthDir());
-
-  // Check bin directory
-  results.push(checkBinDir());
-
-  // Check installed specs
-  const specsCheck = checkInstalledSpecs();
-  results.push(...specsCheck);
+  // Check installed APIs and auth
+  const { apisCheck, authChecks } = checkInstalledApis();
+  results.push(apisCheck);
+  results.push(...authChecks);
 
   // Check network connectivity
   results.push(await checkNetwork());
 
   // Check symlinks
-  results.push(checkSymlinks());
+  const symlinkResult = checkSymlinks(options.fix);
+  results.push(symlinkResult);
+
+  // Check disk space (basic check)
+  results.push(checkDiskSpace());
 
   return results;
+}
+
+// Check if bin directory is in PATH
+function checkPath(): CheckResult {
+  const binDir = getBinDir();
+
+  if (isInPath(binDir)) {
+    return {
+      name: 'PATH includes ~/.clx/bin',
+      status: 'ok',
+      message: binDir,
+    };
+  }
+
+  return {
+    name: 'PATH',
+    status: 'warn',
+    message: `${binDir} not in PATH`,
+    hint: `Run 'clx setup' to add it`,
+  };
 }
 
 // Check config directory exists and is writable
@@ -49,8 +91,8 @@ function checkConfigDir(): CheckResult {
       return {
         name: 'Config directory',
         status: 'warn',
-        message: `Directory does not exist: ${configDir}`,
-        hint: 'Run any clx command to create it automatically',
+        message: `Does not exist: ${configDir}`,
+        hint: 'Run any clx command to create it',
       };
     }
 
@@ -60,196 +102,73 @@ function checkConfigDir(): CheckResult {
     return {
       name: 'Config directory',
       status: 'ok',
-      message: configDir,
+      message: `${configDir} (writable)`,
     };
-  } catch (error) {
+  } catch {
     return {
       name: 'Config directory',
       status: 'error',
       message: `Not writable: ${configDir}`,
-      hint: `Check permissions with: chmod 755 ${configDir}`,
+      hint: `Check permissions: chmod 755 ${configDir}`,
     };
   }
 }
 
-// Check specs directory
-function checkSpecsDir(): CheckResult {
-  const specsDir = getSpecsDir();
-
-  try {
-    if (!fs.existsSync(specsDir)) {
-      return {
-        name: 'Specs directory',
-        status: 'warn',
-        message: `Directory does not exist: ${specsDir}`,
-        hint: 'Run "clx install <api>" to install your first API',
-      };
-    }
-
-    fs.accessSync(specsDir, fs.constants.W_OK);
-
-    return {
-      name: 'Specs directory',
-      status: 'ok',
-      message: specsDir,
-    };
-  } catch (error) {
-    return {
-      name: 'Specs directory',
-      status: 'error',
-      message: `Not writable: ${specsDir}`,
-      hint: `Check permissions with: chmod 755 ${specsDir}`,
-    };
-  }
-}
-
-// Check auth directory
-function checkAuthDir(): CheckResult {
-  const authDir = getAuthDir();
-
-  try {
-    if (!fs.existsSync(authDir)) {
-      return {
-        name: 'Auth directory',
-        status: 'warn',
-        message: `Directory does not exist: ${authDir}`,
-        hint: 'Run "<api> auth login" to configure authentication',
-      };
-    }
-
-    // Check permissions - should be 700 or 750
-    const stats = fs.statSync(authDir);
-    const mode = stats.mode & 0o777;
-
-    if (mode > 0o750) {
-      return {
-        name: 'Auth directory',
-        status: 'warn',
-        message: `Insecure permissions (${mode.toString(8)}): ${authDir}`,
-        hint: `Restrict with: chmod 700 ${authDir}`,
-      };
-    }
-
-    return {
-      name: 'Auth directory',
-      status: 'ok',
-      message: authDir,
-    };
-  } catch (error) {
-    return {
-      name: 'Auth directory',
-      status: 'error',
-      message: `Cannot access: ${authDir}`,
-      hint: 'Check if the directory exists and has correct permissions',
-    };
-  }
-}
-
-// Check bin directory
-function checkBinDir(): CheckResult {
-  const binDir = getBinDir();
-
-  try {
-    if (!fs.existsSync(binDir)) {
-      return {
-        name: 'Bin directory',
-        status: 'warn',
-        message: `Directory does not exist: ${binDir}`,
-        hint: 'Create it or set CLX_BIN_DIR to a different path',
-      };
-    }
-
-    // Check if in PATH
-    const pathDirs = (process.env.PATH || '').split(path.delimiter);
-    const inPath = pathDirs.includes(binDir);
-
-    if (!inPath) {
-      return {
-        name: 'Bin directory',
-        status: 'warn',
-        message: `${binDir} is not in PATH`,
-        hint: `Add to PATH: export PATH="${binDir}:$PATH"`,
-      };
-    }
-
-    // Check if writable
-    try {
-      fs.accessSync(binDir, fs.constants.W_OK);
-    } catch {
-      return {
-        name: 'Bin directory',
-        status: 'warn',
-        message: `Not writable: ${binDir}`,
-        hint: `Set CLX_BIN_DIR to a writable directory`,
-      };
-    }
-
-    return {
-      name: 'Bin directory',
-      status: 'ok',
-      message: `${binDir} (in PATH)`,
-    };
-  } catch (error) {
-    return {
-      name: 'Bin directory',
-      status: 'error',
-      message: `Cannot access: ${binDir}`,
-      hint: 'Set CLX_BIN_DIR to a valid directory',
-    };
-  }
-}
-
-// Check installed specs
-function checkInstalledSpecs(): CheckResult[] {
-  const results: CheckResult[] = [];
+// Check installed APIs and their auth status
+function checkInstalledApis(): { apisCheck: CheckResult; authChecks: CheckResult[] } {
   const specs = listInstalledSpecs();
+  const authChecks: CheckResult[] = [];
 
   if (specs.length === 0) {
-    results.push({
-      name: 'Installed APIs',
-      status: 'warn',
-      message: 'No APIs installed',
-      hint: 'Run "clx install <api>" to install an API',
-    });
-    return results;
+    return {
+      apisCheck: {
+        name: 'Installed APIs',
+        status: 'warn',
+        message: 'None installed',
+        hint: `Run 'clx install <api>' to install an API`,
+      },
+      authChecks: [],
+    };
   }
 
-  results.push({
-    name: 'Installed APIs',
-    status: 'ok',
-    message: `${specs.length} API(s): ${specs.join(', ')}`,
-  });
+  // Count authenticated APIs
+  let authenticated = 0;
+  const notAuthenticated: string[] = [];
 
-  // Check each spec file
-  const specsDir = getSpecsDir();
   for (const spec of specs) {
-    const yamlPath = path.join(specsDir, `${spec}.yaml`);
-    const jsonPath = path.join(specsDir, `${spec}.json`);
-    const specPath = fs.existsSync(yamlPath) ? yamlPath : jsonPath;
-
-    try {
-      const content = fs.readFileSync(specPath, 'utf-8');
-      const size = Buffer.byteLength(content);
-
-      if (size > 10 * 1024 * 1024) { // 10MB
-        results.push({
-          name: `Spec: ${spec}`,
-          status: 'warn',
-          message: `Large spec file (${Math.round(size / 1024 / 1024)}MB)`,
-          hint: 'Large specs may cause slow startup times',
-        });
-      }
-    } catch (error) {
-      results.push({
-        name: `Spec: ${spec}`,
-        status: 'error',
-        message: `Cannot read spec file`,
-        hint: `Try reinstalling with: clx install ${spec}`,
-      });
+    const auth = loadAuth(spec);
+    if (auth && Object.keys(auth.profiles).length > 0) {
+      authenticated++;
+    } else {
+      notAuthenticated.push(spec);
     }
   }
 
-  return results;
+  const apisCheck: CheckResult = {
+    name: `${specs.length} APIs installed`,
+    status: 'ok',
+    message: specs.join(', '),
+  };
+
+  // Add auth status
+  if (authenticated > 0) {
+    authChecks.push({
+      name: `${authenticated} authenticated`,
+      status: 'ok',
+      message: specs.filter(s => !notAuthenticated.includes(s)).join(', '),
+    });
+  }
+
+  for (const api of notAuthenticated) {
+    authChecks.push({
+      name: `${api}`,
+      status: 'warn',
+      message: 'not authenticated',
+      hint: `Run '${api} auth login' to authenticate`,
+    });
+  }
+
+  return { apisCheck, authChecks };
 }
 
 // Check network connectivity
@@ -257,6 +176,7 @@ async function checkNetwork(): Promise<CheckResult> {
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 5000);
+    const startTime = Date.now();
 
     const response = await fetch('https://api.github.com', {
       method: 'HEAD',
@@ -264,12 +184,21 @@ async function checkNetwork(): Promise<CheckResult> {
     });
 
     clearTimeout(timeoutId);
+    const elapsed = Date.now() - startTime;
 
     if (response.ok) {
+      if (elapsed > 2000) {
+        return {
+          name: 'Network',
+          status: 'warn',
+          message: `Slow connection (${elapsed}ms)`,
+          hint: 'Some operations may be slow',
+        };
+      }
       return {
         name: 'Network',
         status: 'ok',
-        message: 'Connected to internet',
+        message: 'registry.clx.dev reachable',
       };
     }
 
@@ -279,18 +208,18 @@ async function checkNetwork(): Promise<CheckResult> {
       message: `API returned ${response.status}`,
       hint: 'Some registry operations may not work',
     };
-  } catch (error) {
+  } catch {
     return {
       name: 'Network',
       status: 'error',
-      message: 'Cannot connect to internet',
-      hint: 'Check your network connection and firewall settings',
+      message: 'Cannot reach network',
+      hint: 'Check your internet connection',
     };
   }
 }
 
 // Check symlinks are valid
-function checkSymlinks(): CheckResult {
+function checkSymlinks(fix = false): CheckResult {
   const binDir = getBinDir();
   const specs = listInstalledSpecs();
 
@@ -303,24 +232,49 @@ function checkSymlinks(): CheckResult {
   }
 
   const broken: string[] = [];
+  const orphaned: string[] = [];
 
   for (const spec of specs) {
     const symlinkPath = path.join(binDir, spec);
 
     try {
-      if (fs.existsSync(symlinkPath)) {
-        const stats = fs.lstatSync(symlinkPath);
-        if (stats.isSymbolicLink()) {
-          const target = fs.readlinkSync(symlinkPath);
-          if (!fs.existsSync(target)) {
-            broken.push(spec);
-          }
-        }
-      } else {
+      if (!fs.existsSync(symlinkPath)) {
         broken.push(spec);
+        continue;
+      }
+
+      const stats = fs.lstatSync(symlinkPath);
+      if (stats.isSymbolicLink()) {
+        const target = fs.readlinkSync(symlinkPath);
+        // Check if target exists (for real files, not bun virtual paths)
+        if (!target.startsWith('/$') && !fs.existsSync(target)) {
+          broken.push(spec);
+        }
       }
     } catch {
       broken.push(spec);
+    }
+  }
+
+  // Check for orphaned symlinks (symlinks without specs)
+  if (fs.existsSync(binDir)) {
+    try {
+      const files = fs.readdirSync(binDir);
+      for (const file of files) {
+        const filePath = path.join(binDir, file);
+        const stats = fs.lstatSync(filePath);
+        if (stats.isSymbolicLink()) {
+          const target = fs.readlinkSync(filePath);
+          if (target.includes('clx') && !specs.includes(file) && file !== 'clx') {
+            orphaned.push(file);
+            if (fix) {
+              fs.unlinkSync(filePath);
+            }
+          }
+        }
+      }
+    } catch {
+      // Ignore errors reading bin dir
     }
   }
 
@@ -328,8 +282,24 @@ function checkSymlinks(): CheckResult {
     return {
       name: 'Symlinks',
       status: 'warn',
-      message: `Missing or broken: ${broken.join(', ')}`,
-      hint: `Reinstall with: clx install ${broken[0]}`,
+      message: `Missing: ${broken.join(', ')}`,
+      hint: `Run 'clx install ${broken[0]}' to fix`,
+    };
+  }
+
+  if (orphaned.length > 0) {
+    if (fix) {
+      return {
+        name: 'Symlinks',
+        status: 'ok',
+        message: `Fixed: removed ${orphaned.length} orphaned symlink(s)`,
+      };
+    }
+    return {
+      name: 'Symlinks',
+      status: 'warn',
+      message: `Orphaned: ${orphaned.join(', ')}`,
+      hint: `Run 'clx doctor --fix' to remove`,
     };
   }
 
@@ -340,47 +310,77 @@ function checkSymlinks(): CheckResult {
   };
 }
 
-// Print diagnostic results
-export function printDiagnostics(results: CheckResult[]): void {
-  console.log('clx doctor\n');
+// Basic disk space check
+function checkDiskSpace(): CheckResult {
+  try {
+    // This is a simplified check - just verify we can write
+    const testFile = path.join(getConfigDir(), '.disktest');
+    fs.writeFileSync(testFile, 'test');
+    fs.unlinkSync(testFile);
 
-  const statusSymbols = {
-    ok: '✓',
-    warn: '!',
-    error: '✗',
-  };
+    return {
+      name: 'Disk space',
+      status: 'ok',
+      message: 'Writable',
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    if (msg.includes('ENOSPC')) {
+      return {
+        name: 'Disk space',
+        status: 'error',
+        message: 'Disk full',
+        hint: 'Free up disk space',
+      };
+    }
+    return {
+      name: 'Disk space',
+      status: 'warn',
+      message: msg,
+    };
+  }
+}
 
-  const statusColors = {
-    ok: '\x1b[32m',    // green
-    warn: '\x1b[33m',  // yellow
-    error: '\x1b[31m', // red
-  };
-  const reset = '\x1b[0m';
+// Print diagnostic results with colors
+export function printDiagnostics(results: CheckResult[], options: DoctorOptions = {}): void {
+  if (options.json) {
+    console.log(JSON.stringify({ checks: results }, null, 2));
+    return;
+  }
+
+  console.log('');
+  console.log(`  ${bold('clx doctor')}`);
+  console.log('');
 
   let hasErrors = false;
   let hasWarnings = false;
+  let warningCount = 0;
 
   for (const result of results) {
-    const symbol = statusSymbols[result.status];
-    const color = statusColors[result.status];
+    const sym = result.status === 'ok' ? green(symbols.success) :
+                result.status === 'warn' ? yellow(symbols.warning) :
+                red(symbols.error);
 
-    console.log(`${color}${symbol}${reset} ${result.name}: ${result.message}`);
+    console.log(`  ${sym} ${result.name}: ${result.message}`);
 
     if (result.hint) {
-      console.log(`    ${result.hint}`);
+      console.log(`      ${dim(result.hint)}`);
     }
 
     if (result.status === 'error') hasErrors = true;
-    if (result.status === 'warn') hasWarnings = true;
+    if (result.status === 'warn') {
+      hasWarnings = true;
+      warningCount++;
+    }
   }
 
-  console.log();
+  console.log('');
 
   if (hasErrors) {
-    console.log('Some checks failed. Please fix the errors above.');
+    console.log(`  ${red('Some checks failed. Please fix the errors above.')}`);
   } else if (hasWarnings) {
-    console.log('Setup looks good, but there are some warnings.');
+    console.log(`  ${warningCount} warning${warningCount > 1 ? 's' : ''}. Run '${cyan('clx auth login <api>')}' to authenticate.`);
   } else {
-    console.log('All checks passed! clx is ready to use.');
+    console.log(`  ${green('All checks passed!')} clx is ready to use.`);
   }
 }

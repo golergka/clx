@@ -4,12 +4,34 @@ import * as os from 'os';
 import YAML from 'yaml';
 import type { OpenAPISpec, AuthConfig, AuthProfile, LegacyAuthConfig } from './types.js';
 
-// XDG standard: ~/.config/clx/
+// Global config file structure
+export interface ClxConfig {
+  update_check?: boolean;
+  output?: 'json' | 'table';
+  color?: boolean;
+  registry?: string;
+  timeout?: number;
+  apis?: Record<string, {
+    base_url?: string;
+    profile?: string;
+  }>;
+}
+
+// Cache for loaded config
+let configCache: ClxConfig | null = null;
+
+// Get config directory - supports CLX_HOME override
 export function getConfigDir(): string {
+  // CLX_HOME takes precedence
+  if (process.env.CLX_HOME) {
+    return process.env.CLX_HOME;
+  }
+  // Then XDG standard
   const xdgConfig = process.env.XDG_CONFIG_HOME;
   if (xdgConfig) {
     return path.join(xdgConfig, 'clx');
   }
+  // Default to ~/.config/clx (XDG compliant)
   return path.join(os.homedir(), '.config', 'clx');
 }
 
@@ -22,11 +44,169 @@ export function getAuthDir(): string {
 }
 
 export function getBinDir(): string {
-  // Default to ~/.local/bin (user-writable), allow override via env
+  // CLX_BIN takes precedence, then CLX_BIN_DIR for backwards compat
+  if (process.env.CLX_BIN) {
+    return process.env.CLX_BIN;
+  }
   if (process.env.CLX_BIN_DIR) {
     return process.env.CLX_BIN_DIR;
   }
   return path.join(os.homedir(), '.local', 'bin');
+}
+
+// Load global config from config.toml
+export function loadConfig(): ClxConfig {
+  if (configCache) {
+    return configCache;
+  }
+
+  const configPath = path.join(getConfigDir(), 'config.toml');
+
+  if (!fs.existsSync(configPath)) {
+    configCache = {};
+    return configCache;
+  }
+
+  try {
+    const content = fs.readFileSync(configPath, 'utf-8');
+    // Simple TOML parser for our use case
+    configCache = parseSimpleToml(content);
+    return configCache;
+  } catch {
+    configCache = {};
+    return configCache;
+  }
+}
+
+// Simple TOML parser for config.toml (handles our specific format)
+function parseSimpleToml(content: string): ClxConfig {
+  const config: ClxConfig = {};
+  const lines = content.split('\n');
+  let currentSection = '';
+  let currentApiName = '';
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    // Skip comments and empty lines
+    if (!trimmed || trimmed.startsWith('#')) {
+      continue;
+    }
+
+    // Section header
+    if (trimmed.startsWith('[')) {
+      const match = trimmed.match(/^\[([^\]]+)\]$/);
+      if (match) {
+        currentSection = match[1];
+        // Handle [apis.stripe] format
+        if (currentSection.startsWith('apis.')) {
+          currentApiName = currentSection.substring(5);
+          if (!config.apis) config.apis = {};
+          config.apis[currentApiName] = {};
+        }
+      }
+      continue;
+    }
+
+    // Key = value
+    const kvMatch = trimmed.match(/^(\w+)\s*=\s*(.+)$/);
+    if (kvMatch) {
+      const key = kvMatch[1];
+      let value: string | boolean | number = kvMatch[2].trim();
+
+      // Parse value
+      if (value === 'true') {
+        value = true;
+      } else if (value === 'false') {
+        value = false;
+      } else if (/^\d+$/.test(value)) {
+        value = parseInt(value, 10);
+      } else if (value.startsWith('"') && value.endsWith('"')) {
+        value = value.slice(1, -1);
+      }
+
+      // Set value based on section
+      if (currentSection.startsWith('apis.') && config.apis && currentApiName) {
+        (config.apis[currentApiName] as Record<string, unknown>)[key] = value;
+      } else {
+        (config as Record<string, unknown>)[key] = value;
+      }
+    }
+  }
+
+  return config;
+}
+
+// Get config value with environment variable override
+export function getConfigValue<K extends keyof ClxConfig>(key: K): ClxConfig[K] | undefined {
+  const config = loadConfig();
+
+  // Check environment variable first
+  const envKey = `CLX_${key.toUpperCase()}`;
+  const envValue = process.env[envKey];
+  if (envValue !== undefined) {
+    if (key === 'update_check' || key === 'color') {
+      return (envValue !== '0' && envValue.toLowerCase() !== 'false') as ClxConfig[K];
+    }
+    if (key === 'timeout') {
+      return parseInt(envValue, 10) as ClxConfig[K];
+    }
+    return envValue as ClxConfig[K];
+  }
+
+  return config[key];
+}
+
+// Get API-specific config
+export function getApiConfig(apiName: string): { base_url?: string; profile?: string } {
+  const config = loadConfig();
+  return config.apis?.[apiName] || {};
+}
+
+// Check if colors should be used
+export function shouldUseColor(): boolean {
+  // NO_COLOR takes precedence (https://no-color.org/)
+  if (process.env.NO_COLOR || process.env.CLX_NO_COLOR) {
+    return false;
+  }
+  // Check config
+  const configColor = getConfigValue('color');
+  if (configColor === false) {
+    return false;
+  }
+  // Default to TTY detection
+  return process.stdout.isTTY ?? false;
+}
+
+// Check if update checks are enabled
+export function shouldCheckUpdates(): boolean {
+  if (process.env.CLX_NO_UPDATE_CHECK) {
+    return false;
+  }
+  const configValue = getConfigValue('update_check');
+  return configValue !== false;
+}
+
+// Get registry URL
+export function getRegistryUrl(): string {
+  return process.env.CLX_REGISTRY || getConfigValue('registry') || 'https://registry.clx.dev';
+}
+
+// Get request timeout in ms
+export function getRequestTimeout(): number {
+  const timeout = getConfigValue('timeout');
+  return (timeout || 30) * 1000;
+}
+
+// Check for API key in environment variable (e.g., STRIPE_API_KEY)
+export function getEnvApiKey(apiName: string): string | undefined {
+  const envKey = `${apiName.toUpperCase()}_API_KEY`;
+  return process.env[envKey];
+}
+
+// Reset config cache (for testing)
+export function resetConfigCache(): void {
+  configCache = null;
 }
 
 export function ensureConfigDirs(): void {

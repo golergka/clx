@@ -2,35 +2,32 @@ import type { CommandNode, OperationInfo, Parameter, OpenAPISpec, Schema } from 
 import { resolveRef } from './parser.js';
 
 // Generate help text for root level (list all resource groups)
+// Kept concise for agent-friendliness (<50 tokens)
 export function generateRootHelp(apiName: string, root: CommandNode): string {
   const lines: string[] = [];
 
-  lines.push(`${root.name || apiName}`);
-  if (root.description) {
-    lines.push(`${root.description}`);
-  }
+  lines.push(`${apiName} - ${root.description || root.name || 'API client'}`);
   lines.push('');
   lines.push('Commands:');
 
-  // List all child resources
+  // List all child resources (sorted)
   const children = Array.from(root.children.entries()).sort((a, b) => a[0].localeCompare(b[0]));
 
   for (const [name, child] of children) {
-    const desc = child.description || `Manage ${name}`;
+    const desc = truncateDesc(child.description || `Manage ${name}`);
     lines.push(`  ${name.padEnd(20)} ${desc}`);
   }
 
   // List root-level operations if any
   if (root.operations.size > 0) {
-    lines.push('');
     for (const [name, op] of root.operations.entries()) {
-      const desc = op.operation.summary || `${op.method.toUpperCase()} ${op.path}`;
+      const desc = truncateDesc(op.operation.summary || '');
       lines.push(`  ${name.padEnd(20)} ${desc}`);
     }
   }
 
   lines.push('');
-  lines.push(`Run '${apiName} <command> --help' for more information.`);
+  lines.push(`Run '${apiName} <command> --help' for details.`);
 
   return lines.join('\n');
 }
@@ -40,40 +37,37 @@ export function generateResourceHelp(apiName: string, resourcePath: string[], no
   const lines: string[] = [];
   const fullCommand = [apiName, ...resourcePath].join(' ');
 
-  lines.push(`${fullCommand}`);
-  if (node.description) {
-    lines.push(`${node.description}`);
-  }
+  lines.push(`${fullCommand} - ${node.description || `Manage ${resourcePath[resourcePath.length - 1]}`}`);
   lines.push('');
 
   // List child resources
   if (node.children.size > 0) {
-    lines.push('Subcommands:');
+    lines.push('Commands:');
     const children = Array.from(node.children.entries()).sort((a, b) => a[0].localeCompare(b[0]));
     for (const [name, child] of children) {
-      const desc = child.description || `Manage ${name}`;
+      const desc = truncateDesc(child.description || `Manage ${name}`);
       lines.push(`  ${name.padEnd(20)} ${desc}`);
     }
-    lines.push('');
   }
 
   // List operations
   if (node.operations.size > 0) {
+    if (node.children.size > 0) lines.push('');
     lines.push('Operations:');
     const ops = Array.from(node.operations.entries()).sort((a, b) => a[0].localeCompare(b[0]));
     for (const [name, op] of ops) {
-      const desc = op.operation.summary || `${op.method.toUpperCase()} ${op.path}`;
+      const desc = truncateDesc(op.operation.summary || '');
       lines.push(`  ${name.padEnd(20)} ${desc}`);
     }
-    lines.push('');
   }
 
+  lines.push('');
   lines.push(`Run '${fullCommand} <command> --help' for details.`);
 
   return lines.join('\n');
 }
 
-// Generate help text for an operation
+// Generate help text for an operation (<100 tokens for agent efficiency)
 export function generateOperationHelp(
   apiName: string,
   resourcePath: string[],
@@ -84,31 +78,20 @@ export function generateOperationHelp(
   const lines: string[] = [];
   const fullCommand = [apiName, ...resourcePath, opName].join(' ');
 
-  lines.push(`${fullCommand}`);
-  if (opInfo.operation.summary) {
-    lines.push(`${opInfo.operation.summary}`);
-  }
-  if (opInfo.operation.description && opInfo.operation.description !== opInfo.operation.summary) {
-    lines.push('');
-    lines.push(opInfo.operation.description);
-  }
-  lines.push('');
-
-  lines.push(`HTTP: ${opInfo.method.toUpperCase()} ${opInfo.path}`);
+  // Summary line
+  lines.push(`${fullCommand} - ${opInfo.operation.summary || opInfo.method.toUpperCase()}`);
   lines.push('');
 
   // Collect all parameters
   const allParams = opInfo.operation.parameters || [];
 
-  // Path parameters
+  // Path parameters (required for the command)
   const pathParams = allParams.filter(p => p.in === 'path');
   if (pathParams.length > 0) {
-    lines.push('Path Parameters:');
+    lines.push('Arguments:');
     for (const param of pathParams) {
-      const required = param.required ? ' (required)' : '';
-      const desc = param.description || '';
-      lines.push(`  --${param.name}${required}`);
-      if (desc) lines.push(`      ${desc}`);
+      const schemaInfo = formatSchemaType(param.schema);
+      lines.push(`  --${param.name} ${schemaInfo}  ${param.required ? '(required)' : ''}`);
     }
     lines.push('');
   }
@@ -116,65 +99,64 @@ export function generateOperationHelp(
   // Query parameters
   const queryParams = allParams.filter(p => p.in === 'query');
   if (queryParams.length > 0) {
-    lines.push('Query Parameters:');
-    for (const param of queryParams) {
-      const required = param.required ? ' (required)' : '';
-      const desc = param.description || '';
+    lines.push('Options:');
+    // Show first 10 most important parameters
+    const sortedParams = queryParams.sort((a, b) => {
+      if (a.required && !b.required) return -1;
+      if (!a.required && b.required) return 1;
+      return 0;
+    });
+    const displayParams = sortedParams.slice(0, 10);
+    for (const param of displayParams) {
       const schemaInfo = formatSchemaType(param.schema);
-      lines.push(`  --${param.name}${required} ${schemaInfo}`);
-      if (desc) lines.push(`      ${desc}`);
+      const req = param.required ? ' (required)' : '';
+      lines.push(`  --${param.name}${req}  ${schemaInfo}`);
+    }
+    if (queryParams.length > 10) {
+      lines.push(`  ... and ${queryParams.length - 10} more options`);
     }
     lines.push('');
   }
 
-  // Request body
+  // Request body (simplified)
   const requestBody = opInfo.operation.requestBody;
   if (requestBody) {
-    const body = '$ref' in requestBody
-      ? resolveRef(spec, requestBody.$ref)
-      : requestBody;
-
-    if (body && typeof body === 'object' && body !== null && 'content' in body) {
-      lines.push('Request Body:');
-      const bodyContent = body as { content: Record<string, { schema?: Schema }> };
-      const jsonContent = bodyContent.content['application/json'];
-      if (jsonContent?.schema) {
-        const schemaEntry = jsonContent.schema as Schema;
-        const schema = schemaEntry.$ref
-          ? resolveRef<Schema>(spec, schemaEntry.$ref)
-          : schemaEntry;
-
-        if (schema) {
-          formatSchemaProperties(lines, schema, spec, '  ');
-        }
-      }
-      lines.push('');
-      lines.push('  Use --data=\'{"key":"value"}\' or pipe JSON via stdin');
-      lines.push('');
-    }
+    lines.push('Body:');
+    lines.push(`  Use --data='{"key":"value"}' or pipe JSON via stdin`);
+    lines.push('');
   }
 
-  // Global options
-  lines.push('Options:');
-  lines.push('  --help              Show this help message');
-  lines.push('  --dry-run           Print curl command without executing');
-  lines.push('  --verbose           Show request/response details');
-  lines.push('  --data=JSON         Request body as JSON string');
+  // Examples
+  lines.push('Examples:');
+  lines.push(`  ${fullCommand}${pathParams.length > 0 ? ` --${pathParams[0].name}=<value>` : ''}`);
+  if (opInfo.method !== 'get') {
+    lines.push(`  ${fullCommand} --data='{"key":"value"}'`);
+  }
 
   return lines.join('\n');
+}
+
+// Truncate description to keep help concise
+function truncateDesc(desc: string, maxLen: number = 40): string {
+  if (!desc) return '';
+  // Remove newlines and extra spaces
+  const cleaned = desc.replace(/\s+/g, ' ').trim();
+  if (cleaned.length <= maxLen) return cleaned;
+  return cleaned.substring(0, maxLen - 3) + '...';
 }
 
 function formatSchemaType(schema?: Schema): string {
   if (!schema) return '';
 
-  let type = schema.type || 'any';
-
   if (schema.enum) {
-    return `[${schema.enum.join('|')}]`;
+    const values = schema.enum.slice(0, 3).join('|');
+    return schema.enum.length > 3 ? `[${values}|...]` : `[${values}]`;
   }
 
+  let type = schema.type || 'any';
+
   if (schema.format) {
-    type = `${type}<${schema.format}>`;
+    type = schema.format;
   }
 
   if (schema.type === 'array' && schema.items) {
@@ -183,30 +165,4 @@ function formatSchemaType(schema?: Schema): string {
   }
 
   return `<${type}>`;
-}
-
-function formatSchemaProperties(lines: string[], schema: Schema, spec: OpenAPISpec, indent: string): void {
-  if (schema.allOf) {
-    for (const subSchema of schema.allOf) {
-      const resolved = '$ref' in subSchema
-        ? resolveRef<Schema>(spec, (subSchema as { $ref: string }).$ref)
-        : subSchema;
-      if (resolved) {
-        formatSchemaProperties(lines, resolved, spec, indent);
-      }
-    }
-    return;
-  }
-
-  if (schema.properties) {
-    const required = new Set(schema.required || []);
-    for (const [name, propSchema] of Object.entries(schema.properties)) {
-      const req = required.has(name) ? ' (required)' : '';
-      const type = formatSchemaType(propSchema);
-      lines.push(`${indent}${name}${req} ${type}`);
-      if (propSchema.description) {
-        lines.push(`${indent}    ${propSchema.description}`);
-      }
-    }
-  }
 }

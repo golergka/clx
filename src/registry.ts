@@ -1,15 +1,16 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { OpenAPISpec } from './types.js';
-import { getSpecsDir, getBinDir, ensureConfigDirs, listInstalledSpecs, removeSpec, loadSpec } from './config.js';
+import { getSpecsDir, getBinDir, ensureConfigDirs, listInstalledSpecs, removeSpec, loadSpec, removeAuth } from './config.js';
 import { validateApiName, sanitizeFilename } from './errors.js';
+import { success, warning, error, dim, cyan, bold, spinner, confirm, isTTY } from './ui.js';
+import { printPathWarning } from './setup.js';
 
 // Known API specs registry
-// In a real implementation, this would be fetched from a remote registry
 interface RegistryEntry {
   url: string;
   description: string;
-  baseUrl?: string; // Override for specs with relative server URLs
+  baseUrl?: string;
 }
 
 const REGISTRY: Record<string, RegistryEntry> = {
@@ -48,76 +49,57 @@ const REGISTRY: Record<string, RegistryEntry> = {
   },
 };
 
-// Get registry entry for an API
 export function getRegistryEntry(apiName: string): RegistryEntry | null {
   return REGISTRY[apiName.toLowerCase()] || null;
 }
 
-// Get the path to the clx binary
 function getClxBinaryPath(): string {
-  // When running compiled, argv[0] is the binary path
-  // When running via bun/node, we need to find the actual binary
   const argv0 = process.argv[0];
 
   if (argv0.includes('bun') || argv0.includes('node')) {
-    // Running via runtime, check if clx is in PATH
     const binDir = getBinDir();
     const clxPath = path.join(binDir, 'clx');
     if (fs.existsSync(clxPath)) {
       return clxPath;
     }
-    // Return the script path for development
     return process.argv[1];
   }
 
   return argv0;
 }
 
-// Create symlink for an API
 function createSymlink(apiName: string): void {
   const binDir = getBinDir();
   const clxPath = getClxBinaryPath();
   const symlinkPath = path.join(binDir, apiName);
 
-  // Ensure bin directory exists
   if (!fs.existsSync(binDir)) {
     fs.mkdirSync(binDir, { recursive: true });
   }
 
-  // Check if symlink already exists
   if (fs.existsSync(symlinkPath)) {
     const stats = fs.lstatSync(symlinkPath);
     if (stats.isSymbolicLink()) {
-      // Remove existing symlink
       fs.unlinkSync(symlinkPath);
     } else {
-      console.error(`Error: ${symlinkPath} exists and is not a symlink.`);
-      console.error(`Please remove it manually if you want to install ${apiName}.`);
+      console.log(error(`${symlinkPath} exists and is not a symlink`));
+      console.log(`    Please remove it manually to install ${apiName}.`);
       process.exit(1);
     }
   }
 
   try {
     fs.symlinkSync(clxPath, symlinkPath);
-  } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code === 'EACCES') {
-      console.error(`Permission denied creating symlink at ${binDir}.`);
-      console.error(`Set CLX_BIN_DIR to a writable directory.`);
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'EACCES') {
+      console.log(error(`Permission denied creating symlink`));
+      console.log(`    Set CLX_BIN_DIR to a writable directory.`);
     } else {
-      throw error;
+      throw err;
     }
-    return;
-  }
-
-  // Check if binDir is in PATH
-  const pathDirs = (process.env.PATH || '').split(path.delimiter);
-  if (!pathDirs.includes(binDir)) {
-    console.log(`Note: Add ${binDir} to your PATH to use '${apiName}' directly.`);
-    console.log(`  export PATH="${binDir}:$PATH"`);
   }
 }
 
-// Remove symlink for an API
 function removeSymlink(apiName: string): boolean {
   const binDir = getBinDir();
   const symlinkPath = path.join(binDir, apiName);
@@ -132,33 +114,57 @@ function removeSymlink(apiName: string): boolean {
   return false;
 }
 
-// Search registry
-export function searchRegistry(query: string): void {
+export interface ListOptions {
+  json?: boolean;
+}
+
+export function searchRegistry(query: string, options: { json?: boolean } = {}): void {
   const results = Object.entries(REGISTRY)
     .filter(([name, info]) =>
+      !query ||
       name.includes(query.toLowerCase()) ||
       info.description.toLowerCase().includes(query.toLowerCase())
     );
 
-  if (results.length === 0) {
-    console.log(`No APIs found matching '${query}'.`);
+  if (options.json) {
+    const apis = results.map(([name, info]) => ({
+      name,
+      description: info.description,
+      url: info.url,
+    }));
+    console.log(JSON.stringify({ apis }, null, 2));
     return;
   }
 
-  console.log('Available APIs:');
-  console.log();
+  if (results.length === 0) {
+    console.log(warning(`No APIs found matching '${query}'`));
+    return;
+  }
+
+  console.log('');
+  console.log(`  ${bold('Available APIs:')}`);
+  console.log('');
 
   for (const [name, info] of results) {
-    console.log(`  ${name.padEnd(15)} ${info.description}`);
+    console.log(`  ${cyan(name.padEnd(15))} ${info.description}`);
   }
+
+  console.log('');
+  console.log(`  Run '${cyan('clx install <api>')}' to install.`);
 }
 
-// Install an API from registry or URL
-export async function installApi(nameOrUrl: string, customName?: string): Promise<void> {
+export interface InstallOptions {
+  name?: string;
+  quiet?: boolean;
+  json?: boolean;
+}
+
+export async function installApi(nameOrUrl: string, options: InstallOptions = {}): Promise<void> {
   ensureConfigDirs();
 
   let url: string;
   let apiName: string;
+  const customName = options.name;
 
   // Check if it's a URL
   if (nameOrUrl.startsWith('http://') || nameOrUrl.startsWith('https://')) {
@@ -168,29 +174,43 @@ export async function installApi(nameOrUrl: string, customName?: string): Promis
   } else if (nameOrUrl.endsWith('.yaml') || nameOrUrl.endsWith('.json') || nameOrUrl.endsWith('.yml')) {
     // Local file
     if (!fs.existsSync(nameOrUrl)) {
-      console.error(`File not found: ${nameOrUrl}`);
+      console.log(error(`File not found: ${nameOrUrl}`));
       process.exit(1);
     }
 
     apiName = sanitizeFilename(customName || path.basename(nameOrUrl, path.extname(nameOrUrl)));
     validateApiName(apiName);
-    const content = fs.readFileSync(nameOrUrl, 'utf-8');
 
-    // Copy to specs directory
     const ext = path.extname(nameOrUrl);
     const destPath = path.join(getSpecsDir(), `${apiName}${ext}`);
     fs.copyFileSync(nameOrUrl, destPath);
 
-    console.log(`Installed ${apiName} from local file.`);
     createSymlink(apiName);
+
+    if (options.json) {
+      console.log(JSON.stringify({ installed: apiName, source: 'local', path: destPath }));
+    } else if (!options.quiet) {
+      console.log(success(`Installed ${apiName} from local file`));
+      printPathWarning();
+    }
     return;
   } else {
     // Look up in registry
     const registryEntry = REGISTRY[nameOrUrl.toLowerCase()];
     if (!registryEntry) {
-      console.error(`API '${nameOrUrl}' not found in registry.`);
-      console.error(`Use 'clx search <query>' to find available APIs.`);
-      console.error(`Or provide a URL or local file path.`);
+      console.log(error(`API '${nameOrUrl}' not found in registry`));
+      console.log('');
+      console.log(`    Did you mean one of these?`);
+      const similar = Object.keys(REGISTRY).filter(k =>
+        k.includes(nameOrUrl.toLowerCase()) || nameOrUrl.toLowerCase().includes(k)
+      );
+      if (similar.length > 0) {
+        for (const s of similar.slice(0, 3)) {
+          console.log(`      ${cyan(s)}`);
+        }
+      }
+      console.log('');
+      console.log(`    Run '${cyan('clx search')}' to see all available APIs.`);
       process.exit(1);
     }
 
@@ -198,97 +218,179 @@ export async function installApi(nameOrUrl: string, customName?: string): Promis
     apiName = customName || nameOrUrl.toLowerCase();
   }
 
-  console.log(`Downloading ${apiName}...`);
+  const s = !options.quiet && isTTY ? spinner(`Installing ${apiName}`) : null;
 
   try {
+    s?.update(`Fetching spec`);
     const response = await fetch(url);
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
 
+    s?.update(`Parsing spec`);
     const content = await response.text();
-
-    // Determine format from URL or content
     const isYaml = url.endsWith('.yaml') || url.endsWith('.yml') || content.trim().startsWith('openapi:');
     const ext = isYaml ? '.yaml' : '.json';
 
     const destPath = path.join(getSpecsDir(), `${apiName}${ext}`);
     fs.writeFileSync(destPath, content);
 
-    console.log(`Saved spec to ${destPath}`);
+    s?.update(`Creating symlink`);
     createSymlink(apiName);
 
-    console.log();
-    console.log(`Successfully installed ${apiName}.`);
-    console.log(`Run '${apiName} --help' to get started.`);
-  } catch (error) {
-    console.error(`Failed to download spec: ${error}`);
+    // Get spec info for output
+    const spec = loadSpec(apiName);
+    const version = spec?.info?.version || 'unknown';
+    const endpoints = spec?.paths ? Object.keys(spec.paths).length : 0;
+
+    s?.stop(`Installed ${apiName}`, 'success');
+
+    if (options.json) {
+      console.log(JSON.stringify({
+        installed: apiName,
+        source: 'registry',
+        version,
+        endpoints,
+      }));
+    } else if (!options.quiet) {
+      console.log(dim(`    └─ v${version} • ${endpoints} endpoints`));
+      printPathWarning();
+      console.log('');
+      console.log(`  Run '${cyan(`${apiName} --help`)}' to get started.`);
+    }
+  } catch (err) {
+    s?.stop(`Failed to install ${apiName}`, 'error');
+
+    if (!options.quiet) {
+      console.log('');
+      console.log(`    ${err instanceof Error ? err.message : String(err)}`);
+      console.log('');
+      console.log(`    Check your internet connection and try again.`);
+    }
     process.exit(1);
   }
 }
 
-// List installed APIs
-export function listApis(): void {
+export function listApis(options: ListOptions = {}): void {
   const installed = listInstalledSpecs();
 
-  if (installed.length === 0) {
-    console.log('No APIs installed.');
-    console.log(`Run 'clx install <api>' to install an API.`);
+  if (options.json) {
+    const apis = installed.map(name => {
+      const spec = loadSpec(name);
+      return {
+        name,
+        title: spec?.info?.title || name,
+        version: spec?.info?.version || 'unknown',
+      };
+    });
+    console.log(JSON.stringify({ apis }, null, 2));
     return;
   }
 
-  console.log('Installed APIs:');
-  console.log();
+  if (installed.length === 0) {
+    console.log(warning('No APIs installed'));
+    console.log(`    Run '${cyan('clx install <api>')}' to install an API.`);
+    return;
+  }
+
+  console.log('');
+  console.log(`  ${bold('Installed APIs:')}`);
+  console.log('');
 
   for (const name of installed) {
     const spec = loadSpec(name);
     const title = spec?.info?.title || name;
     const version = spec?.info?.version || 'unknown';
-    console.log(`  ${name.padEnd(15)} ${title} (v${version})`);
+    console.log(`  ${cyan(name.padEnd(15))} ${title} ${dim(`(v${version})`)}`);
   }
 }
 
-// Update an API
-export async function updateApi(apiName: string): Promise<void> {
+export interface UpdateOptions {
+  quiet?: boolean;
+  json?: boolean;
+}
+
+export async function updateApi(apiName: string, options: UpdateOptions = {}): Promise<void> {
   const spec = loadSpec(apiName);
   if (!spec) {
-    console.error(`API '${apiName}' is not installed.`);
+    console.log(error(`API '${apiName}' is not installed`));
     process.exit(1);
   }
 
-  // Check registry for update
   const registryEntry = REGISTRY[apiName.toLowerCase()];
   if (!registryEntry) {
-    console.error(`API '${apiName}' is not in the registry. Cannot auto-update.`);
-    console.error(`Re-install manually with: clx install <url> --name ${apiName}`);
+    console.log(error(`API '${apiName}' is not in the registry`));
+    console.log(`    Re-install manually with: ${cyan(`clx install <url> --name ${apiName}`)}`);
     process.exit(1);
   }
 
-  console.log(`Updating ${apiName}...`);
-  await installApi(registryEntry.url, apiName);
+  const oldVersion = spec.info?.version || 'unknown';
+
+  await installApi(registryEntry.url, { name: apiName, quiet: options.quiet, json: options.json });
+
+  const newSpec = loadSpec(apiName);
+  const newVersion = newSpec?.info?.version || 'unknown';
+
+  if (!options.quiet && !options.json && oldVersion !== newVersion) {
+    console.log(dim(`    Updated from v${oldVersion} to v${newVersion}`));
+  }
 }
 
-// Remove an API
-export function removeApi(apiName: string): void {
+export interface RemoveOptions {
+  yes?: boolean;
+  quiet?: boolean;
+  json?: boolean;
+}
+
+export async function removeApi(apiName: string, options: RemoveOptions = {}): Promise<void> {
+  const spec = loadSpec(apiName);
+  if (!spec) {
+    if (options.json) {
+      console.log(JSON.stringify({ error: 'not_installed', api: apiName }));
+    } else {
+      console.log(error(`API '${apiName}' is not installed`));
+    }
+    process.exit(1);
+  }
+
+  // Confirmation prompt unless --yes
+  if (!options.yes && !options.quiet && isTTY) {
+    console.log('');
+    console.log(`  This will remove:`);
+    console.log(`    • ${apiName} API and symlink`);
+    console.log(`    • Saved authentication`);
+    console.log('');
+
+    const confirmed = await confirm('Are you sure?', false);
+    if (!confirmed) {
+      console.log('');
+      console.log(dim('  Cancelled.'));
+      return;
+    }
+  }
+
   const specRemoved = removeSpec(apiName);
   const symlinkRemoved = removeSymlink(apiName);
+  const authRemoved = removeAuth(apiName);
 
-  if (!specRemoved && !symlinkRemoved) {
-    console.error(`API '${apiName}' is not installed.`);
-    process.exit(1);
+  if (options.json) {
+    console.log(JSON.stringify({
+      removed: apiName,
+      specRemoved,
+      symlinkRemoved,
+      authRemoved,
+    }));
+  } else if (!options.quiet) {
+    console.log(success(`Uninstalled ${apiName}`));
   }
-
-  console.log(`Removed ${apiName}.`);
 }
 
-// Add a local spec file
 export function addLocalSpec(filePath: string, name: string): void {
-  // Validate and sanitize the name
   const sanitizedName = sanitizeFilename(name);
   validateApiName(sanitizedName);
 
   if (!fs.existsSync(filePath)) {
-    console.error(`File not found: ${filePath}`);
+    console.log(error(`File not found: ${filePath}`));
     process.exit(1);
   }
 
@@ -298,8 +400,9 @@ export function addLocalSpec(filePath: string, name: string): void {
   const destPath = path.join(getSpecsDir(), `${sanitizedName}${ext}`);
 
   fs.copyFileSync(filePath, destPath);
-  console.log(`Added spec to ${destPath}`);
-
   createSymlink(sanitizedName);
-  console.log(`Created command '${sanitizedName}'.`);
+
+  console.log(success(`Added ${sanitizedName}`));
+  console.log(dim(`    └─ ${destPath}`));
+  printPathWarning();
 }

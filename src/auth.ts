@@ -8,7 +8,9 @@ import {
   removeAuthProfile,
   getAuthProfile,
   listAuthProfiles,
-  setDefaultAuthProfile
+  setDefaultAuthProfile,
+  getEnvApiKey,
+  getApiConfig
 } from './config.js';
 
 // Interactive prompt helper
@@ -177,7 +179,21 @@ export async function refreshOAuth2Token(profile: AuthProfile, apiName: string, 
 
 // Check if token needs refresh and refresh if needed
 export async function ensureValidToken(apiName: string, profileName?: string): Promise<AuthProfile | null> {
-  const profile = getAuthProfile(apiName, profileName);
+  // First check for environment variable API key (e.g., STRIPE_API_KEY)
+  const envApiKey = getEnvApiKey(apiName);
+  if (envApiKey) {
+    return {
+      type: 'apiKey',
+      apiKey: envApiKey,
+      apiKeyHeader: 'Authorization', // Default to Authorization header with Bearer
+    };
+  }
+
+  // Get profile name from config if not specified
+  const apiConfig = getApiConfig(apiName);
+  const effectiveProfileName = profileName || apiConfig.profile;
+
+  const profile = getAuthProfile(apiName, effectiveProfileName);
   if (!profile) return null;
 
   if (profile.type !== 'oauth2' || !profile.oauth2) {
@@ -197,7 +213,7 @@ export async function ensureValidToken(apiName: string, profileName?: string): P
 
   if (expiresAt - now <= bufferSeconds) {
     console.error('Access token expired or expiring soon, refreshing...');
-    const refreshed = await refreshOAuth2Token(profile, apiName, profileName || 'default');
+    const refreshed = await refreshOAuth2Token(profile, apiName, effectiveProfileName || 'default');
     return refreshed || profile;
   }
 

@@ -3,24 +3,29 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import type { OpenAPISpec, CommandNode, ExecutionContext } from './types.js';
-import { loadSpec, getAuthProfile, ensureConfigDirs, listInstalledSpecs } from './config.js';
+import { loadSpec, getAuthProfile, ensureConfigDirs, listInstalledSpecs, getConfigDir } from './config.js';
 import { buildCommandTree, getBaseUrl } from './parser.js';
 import { generateRootHelp, generateResourceHelp, generateOperationHelp } from './help.js';
 import { parseArgs, buildRequest, executeRequest, generateCurl } from './executor.js';
 import { authLogin, authStatus, authLogout, authList, authSwitch, ensureValidToken } from './auth.js';
-import { searchRegistry, installApi, listApis, updateApi, removeApi, addLocalSpec, getRegistryEntry } from './registry.js';
+import { searchRegistry, installApi, listApis, updateApi, removeApi, addLocalSpec, getRegistryEntry, type InstallOptions, type ListOptions, type UpdateOptions, type RemoveOptions } from './registry.js';
 import { formatOutput } from './output.js';
-import { runDiagnostics, printDiagnostics } from './doctor.js';
-import { generateCompletion } from './completions.js';
-import { formatError, ExitCode, ClxError, UsageError } from './errors.js';
+import { runDiagnostics, printDiagnostics, type DoctorOptions } from './doctor.js';
+import { handleCompletions } from './completions.js';
+import { runSetup, isInPath, type SetupOptions } from './setup.js';
+import { formatError, formatErrorJson, ExitCode, ClxError, UsageError, suggestCommand } from './errors.js';
+import { success, warning, error, info, bold, dim, cyan, confirm, isTTY, box } from './ui.js';
+import { checkForUpdates, getVersion } from './update.js';
+
+const VERSION = getVersion();
 
 // Get API name from argv[0] (busybox pattern)
 function getApiName(): string {
   const argv0 = process.argv[1];
   const basename = path.basename(argv0);
 
-  // Handle .ts extension during development
-  if (basename.endsWith('.ts')) {
+  // Development mode: running via ts-node or node dist/index.js
+  if (basename.endsWith('.ts') || basename === 'index.js') {
     return 'clx';
   }
 
@@ -29,7 +34,6 @@ function getApiName(): string {
 
 // Read stdin if available (non-blocking check)
 async function readStdin(): Promise<string | undefined> {
-  // Check if stdin is a TTY (interactive terminal)
   if (process.stdin.isTTY) {
     return undefined;
   }
@@ -54,13 +58,88 @@ async function readStdin(): Promise<string | undefined> {
       resolve(undefined);
     });
 
-    // Start reading
     process.stdin.resume();
   });
 }
 
+// Check if this is the first run
+function isFirstRun(): boolean {
+  const configDir = getConfigDir();
+  return !fs.existsSync(configDir) && !process.env.CLX_SKIP_SETUP;
+}
+
+// First-run experience
+async function handleFirstRun(apiName?: string): Promise<boolean> {
+  if (!isTTY) {
+    return false;
+  }
+
+  console.log('');
+  console.log(`  ${bold('Welcome to clx!')}`);
+  console.log('');
+  console.log(`  Looks like this is your first time. Let's get set up.`);
+  console.log('');
+
+  // Ask about PATH setup
+  const binDir = path.join(require('os').homedir(), '.local', 'bin');
+  if (!isInPath(binDir)) {
+    const shouldSetup = await confirm('Add clx to your PATH?', true);
+    if (shouldSetup) {
+      await runSetup({ yes: true });
+    }
+  }
+
+  // If they tried to use an API, offer to install it
+  if (apiName && apiName !== 'clx') {
+    console.log('');
+    const shouldInstall = await confirm(`Install '${apiName}' API?`, true);
+    if (shouldInstall) {
+      await installApi(apiName);
+      console.log('');
+      console.log(`  Now authenticate:`);
+      console.log(`    ${cyan(`clx auth login ${apiName}`)}`);
+      console.log('');
+      console.log(`  Then try again:`);
+      console.log(`    ${cyan(`${apiName} --help`)}`);
+      return true;
+    }
+  }
+
+  ensureConfigDirs();
+  return false;
+}
+
+// Global options
+interface GlobalOptions {
+  json?: boolean;
+  quiet?: boolean;
+  verbose?: boolean;
+  yes?: boolean;
+}
+
+function parseGlobalOptions(args: string[]): { options: GlobalOptions; remaining: string[] } {
+  const options: GlobalOptions = {};
+  const remaining: string[] = [];
+
+  for (const arg of args) {
+    if (arg === '--json') {
+      options.json = true;
+    } else if (arg === '--quiet' || arg === '-q') {
+      options.quiet = true;
+    } else if (arg === '--verbose' || arg === '-v') {
+      options.verbose = true;
+    } else if (arg === '--yes' || arg === '-y') {
+      options.yes = true;
+    } else {
+      remaining.push(arg);
+    }
+  }
+
+  return { options, remaining };
+}
+
 // Handle clx package manager commands
-async function handleClxCommands(args: string[]): Promise<boolean> {
+async function handleClxCommands(args: string[], globalOpts: GlobalOptions): Promise<boolean> {
   if (args.length === 0) {
     printClxHelp();
     return true;
@@ -79,104 +158,149 @@ async function handleClxCommands(args: string[]): Promise<boolean> {
     case '--version':
     case '-v':
     case 'version':
-      console.log('clx version 0.1.0');
+      if (globalOpts.json) {
+        console.log(JSON.stringify({ version: VERSION }));
+      } else {
+        console.log(`clx version ${VERSION}`);
+      }
       return true;
 
     case 'install': {
       if (rest.length === 0) {
-        console.error('Usage: clx install <api|url|file> [--name <name>]');
-        process.exit(1);
+        console.log(error('Missing API name'));
+        console.log(`    Usage: clx install <api|url|file> [--name <name>]`);
+        process.exit(ExitCode.USAGE_ERROR);
       }
       const { flags, positional } = parseArgs(rest);
-      const name = flags.get('name');
-      await installApi(positional[0], name);
+      const installOpts: InstallOptions = {
+        name: flags.get('name'),
+        quiet: globalOpts.quiet,
+        json: globalOpts.json,
+      };
+      await installApi(positional[0], installOpts);
       return true;
     }
 
     case 'remove':
     case 'uninstall': {
       if (rest.length === 0) {
-        console.error('Usage: clx remove <api>');
-        process.exit(1);
+        console.log(error('Missing API name'));
+        console.log(`    Usage: clx remove <api>`);
+        process.exit(ExitCode.USAGE_ERROR);
       }
-      removeApi(rest[0]);
+      const removeOpts: RemoveOptions = {
+        yes: globalOpts.yes,
+        quiet: globalOpts.quiet,
+        json: globalOpts.json,
+      };
+      await removeApi(rest[0], removeOpts);
       return true;
     }
 
     case 'list':
-    case 'ls':
-      listApis();
+    case 'ls': {
+      const listOpts: ListOptions = {
+        json: globalOpts.json,
+      };
+      listApis(listOpts);
       return true;
+    }
 
     case 'update': {
       const { flags, positional } = parseArgs(rest);
+      const updateOpts: UpdateOptions = {
+        quiet: globalOpts.quiet,
+        json: globalOpts.json,
+      };
+
       if (flags.has('all')) {
-        // Update all installed APIs
         const installed = listInstalledSpecs();
         if (installed.length === 0) {
-          console.log('No APIs installed.');
+          if (globalOpts.json) {
+            console.log(JSON.stringify({ updated: [] }));
+          } else {
+            console.log(warning('No APIs installed'));
+          }
           return true;
         }
-        console.log(`Updating ${installed.length} API(s)...`);
+
+        if (!globalOpts.quiet && !globalOpts.json) {
+          console.log(`Updating ${installed.length} API(s)...`);
+        }
+
+        const results: { api: string; success: boolean; error?: string }[] = [];
         for (const api of installed) {
           try {
-            await updateApi(api);
-          } catch (error) {
-            console.error(`Failed to update ${api}: ${error instanceof Error ? error.message : error}`);
+            await updateApi(api, updateOpts);
+            results.push({ api, success: true });
+          } catch (err) {
+            results.push({ api, success: false, error: err instanceof Error ? err.message : String(err) });
           }
+        }
+
+        if (globalOpts.json) {
+          console.log(JSON.stringify({ updated: results }));
         }
         return true;
       }
+
       if (positional.length === 0) {
-        console.error('Usage: clx update <api> or clx update --all');
-        process.exit(1);
+        console.log(error('Missing API name'));
+        console.log(`    Usage: clx update <api> or clx update --all`);
+        process.exit(ExitCode.USAGE_ERROR);
       }
-      await updateApi(positional[0]);
+      await updateApi(positional[0], updateOpts);
       return true;
     }
 
     case 'doctor': {
-      const results = await runDiagnostics();
-      printDiagnostics(results);
+      const { flags } = parseArgs(rest);
+      const doctorOpts: DoctorOptions = {
+        json: globalOpts.json,
+        fix: flags.has('fix'),
+      };
+      const results = await runDiagnostics(doctorOpts);
+      printDiagnostics(results, doctorOpts);
       return true;
     }
 
-    case 'completion': {
-      if (rest.length === 0) {
-        console.error('Usage: clx completion <bash|zsh|fish>');
-        console.error('Example: eval "$(clx completion bash)"');
-        process.exit(1);
-      }
-      try {
-        const script = generateCompletion(rest[0]);
-        console.log(script);
-      } catch (error) {
-        console.error(error instanceof Error ? error.message : error);
-        process.exit(1);
-      }
+    case 'setup': {
+      const { flags } = parseArgs(rest);
+      const setupOpts: SetupOptions = {
+        shell: flags.get('shell'),
+        yes: globalOpts.yes || flags.has('yes'),
+        check: flags.has('check'),
+        uninstall: flags.has('uninstall'),
+        json: globalOpts.json,
+      };
+      await runSetup(setupOpts);
+      return true;
+    }
+
+    case 'completion':
+    case 'completions': {
+      handleCompletions(rest);
       return true;
     }
 
     case 'search': {
-      if (rest.length === 0) {
-        // Show all available
-        searchRegistry('');
-      } else {
-        searchRegistry(rest[0]);
-      }
+      const { flags } = parseArgs(rest);
+      searchRegistry(rest[0] || '', { json: globalOpts.json });
       return true;
     }
 
     case 'add': {
       if (rest.length === 0) {
-        console.error('Usage: clx add <file> --name <name>');
-        process.exit(1);
+        console.log(error('Missing file path'));
+        console.log(`    Usage: clx add <file> --name <name>`);
+        process.exit(ExitCode.USAGE_ERROR);
       }
       const { flags, positional } = parseArgs(rest);
       const name = flags.get('name');
       if (!name) {
-        console.error('--name is required for local specs');
-        process.exit(1);
+        console.log(error('Missing --name flag'));
+        console.log(`    Usage: clx add <file> --name <name>`);
+        process.exit(ExitCode.USAGE_ERROR);
       }
       addLocalSpec(positional[0], name);
       return true;
@@ -188,43 +312,40 @@ async function handleClxCommands(args: string[]): Promise<boolean> {
 }
 
 function printClxHelp(): void {
-  console.log(`clx - CLI API Client Generator
+  console.log(`${bold('clx')} - CLI API Client Generator
 
-Usage:
+${bold('Usage:')}
   clx <command> [options]
 
-Package Management:
-  install <api>       Install an API from registry
-  install <url>       Install an API from URL
-  install <file>      Install an API from local file
-  remove <api>        Remove an installed API
+${bold('Package Management:')}
+  install <api>       Install API from registry
+  install <url>       Install API from URL
+  remove <api>        Remove installed API
   list                List installed APIs
-  update <api>        Update an API to latest version
-  update --all        Update all installed APIs
+  update <api>        Update API to latest
+  update --all        Update all APIs
   search [query]      Search available APIs
-  add <file> --name   Add a local OpenAPI spec
 
-Utilities:
+${bold('Configuration:')}
+  setup               Configure shell integration
   doctor              Run diagnostic checks
-  completion <shell>  Generate shell completion (bash, zsh, fish)
+  completions <shell> Generate shell completions
 
-Options:
-  --help              Show this help
+${bold('Options:')}
+  --json              JSON output
+  --quiet, -q         Suppress output
+  --yes, -y           Skip confirmations
+  --help              Show help
   --version           Show version
 
-Examples:
+${bold('Examples:')}
   clx install stripe
   clx install https://api.example.com/openapi.yaml --name myapi
-  clx add ./spec.yaml --name myapi
-  clx list
-  clx remove stripe
-  clx doctor
-  eval "$(clx completion bash)"
-
-After installing, use the API name as a command:
-  stripe --help
   stripe customers list --output=table
   stripe customers get cus_123 --field=email
+
+${bold('Documentation:')}
+  https://github.com/clx-dev/clx
 `);
 }
 
@@ -240,12 +361,10 @@ function navigateTree(
   while (i < args.length) {
     const arg = args[i];
 
-    // Stop at flags
     if (arg.startsWith('-')) {
       break;
     }
 
-    // Check for child node
     if (current.children.has(arg)) {
       current = current.children.get(arg)!;
       path.push(arg);
@@ -253,14 +372,12 @@ function navigateTree(
       continue;
     }
 
-    // Check for operation
     if (current.operations.has(arg)) {
       path.push(arg);
       i++;
       break;
     }
 
-    // Unknown argument - stop here
     break;
   }
 
@@ -290,26 +407,27 @@ async function handleAuthCommand(apiName: string, spec: OpenAPISpec, args: strin
     case 'switch':
     case 'use':
       if (positional.length < 2) {
-        console.error('Usage: auth switch <profile-name>');
-        process.exit(1);
+        console.log(error('Missing profile name'));
+        console.log(`    Usage: ${apiName} auth switch <profile>`);
+        process.exit(ExitCode.USAGE_ERROR);
       }
       authSwitch(apiName, positional[1]);
       break;
     default:
-      console.log(`${apiName} auth <command> [--profile <name>]
+      console.log(`${bold(`${apiName} auth`)} - Manage authentication
 
-Commands:
+${bold('Commands:')}
   login [--profile <name>]    Configure authentication
-  status [--profile <name>]   Show current auth status
-  logout [--profile <name>]   Clear credentials (all if no profile specified)
+  status [--profile <name>]   Show auth status
+  logout [--profile <name>]   Clear credentials
   list                        List all profiles
   switch <name>               Set default profile
 
-Examples:
-  ${apiName} auth login                    # Login with default profile
-  ${apiName} auth login --profile prod     # Login with 'prod' profile
-  ${apiName} auth list                     # Show all profiles
-  ${apiName} auth switch prod              # Set 'prod' as default
+${bold('Examples:')}
+  ${apiName} auth login
+  ${apiName} auth login --profile prod
+  ${apiName} auth list
+  ${apiName} auth switch prod
 `);
   }
 }
@@ -317,11 +435,20 @@ Examples:
 // Main execution
 async function main(): Promise<void> {
   const apiName = getApiName();
-  const args = process.argv.slice(2);
+  const allArgs = process.argv.slice(2);
+
+  // Parse global options
+  const { options: globalOpts, remaining: args } = parseGlobalOptions(allArgs);
+
+  // First-run experience
+  if (isFirstRun() && apiName === 'clx') {
+    const handled = await handleFirstRun();
+    if (handled) return;
+  }
 
   // If running as 'clx', handle package manager commands
   if (apiName === 'clx') {
-    const handled = await handleClxCommands(args);
+    const handled = await handleClxCommands(args, globalOpts);
     if (handled) return;
 
     // Check if first arg is an installed API (for development)
@@ -329,30 +456,52 @@ async function main(): Promise<void> {
       const potentialApi = args[0];
       const spec = loadSpec(potentialApi);
       if (spec) {
-        // Recurse with the API as if called directly
         process.argv = [process.argv[0], potentialApi, ...args.slice(1)];
-        await runApiCli(potentialApi, args.slice(1));
+        await runApiCli(potentialApi, args.slice(1), globalOpts);
         return;
       }
+
+      // Suggest similar commands
+      const allCommands = ['install', 'remove', 'list', 'update', 'search', 'add', 'doctor', 'setup', 'completions', 'help', 'version'];
+      const installed = listInstalledSpecs();
+      const suggestion = suggestCommand(potentialApi, [...allCommands, ...installed]);
+
+      console.log(error(`Unknown command: ${potentialApi}`));
+      if (suggestion) {
+        console.log('');
+        console.log(`    Did you mean: ${cyan(suggestion)}`);
+      }
+      console.log('');
+      console.log(`    Run '${cyan('clx --help')}' for available commands.`);
+      process.exit(ExitCode.NOT_FOUND);
     }
 
-    console.error(`Unknown command: ${args[0]}`);
-    console.error(`Run 'clx --help' for usage.`);
-    process.exit(1);
+    printClxHelp();
+    return;
   }
 
   // Running as an API CLI (e.g., 'stripe')
-  await runApiCli(apiName, args);
+  await runApiCli(apiName, args, globalOpts);
 }
 
-async function runApiCli(apiName: string, args: string[]): Promise<void> {
-  // Load the spec
+async function runApiCli(apiName: string, args: string[], globalOpts: GlobalOptions): Promise<void> {
   const spec = loadSpec(apiName);
 
   if (!spec) {
-    console.error(`API '${apiName}' is not installed.`);
-    console.error(`Run 'clx install ${apiName}' to install it.`);
-    process.exit(1);
+    // First-run: offer to install
+    if (isFirstRun() || !fs.existsSync(getConfigDir())) {
+      const handled = await handleFirstRun(apiName);
+      if (handled) return;
+    }
+
+    if (globalOpts.json) {
+      console.log(JSON.stringify(formatErrorJson(new UsageError(`API '${apiName}' is not installed.`))));
+    } else {
+      console.log(error(`API '${apiName}' is not installed`));
+      console.log('');
+      console.log(`    Run '${cyan(`clx install ${apiName}`)}' to install it.`);
+    }
+    process.exit(ExitCode.NOT_FOUND);
   }
 
   // Handle auth subcommand
@@ -398,13 +547,17 @@ async function runApiCli(apiName: string, args: string[]): Promise<void> {
 
   // Execute operation
   if (!operation) {
-    // Maybe the last path item is a resource, show its help
     if (node.children.size > 0 || node.operations.size > 0) {
       console.log(generateResourceHelp(apiName, path, node));
     } else {
-      console.error(`Unknown command: ${positional.join(' ')}`);
-      console.error(`Run '${apiName} --help' for available commands.`);
-      process.exit(1);
+      if (globalOpts.json) {
+        console.log(JSON.stringify({ error: { type: 'not_found', message: `Unknown command: ${positional.join(' ')}` } }));
+      } else {
+        console.log(error(`Unknown command: ${positional.join(' ')}`));
+        console.log('');
+        console.log(`    Run '${cyan(`${apiName} --help`)}' for available commands.`);
+      }
+      process.exit(ExitCode.NOT_FOUND);
     }
     return;
   }
@@ -420,9 +573,14 @@ async function runApiCli(apiName: string, args: string[]): Promise<void> {
   const baseUrl = getBaseUrl(spec, registryEntry?.baseUrl);
 
   if (!baseUrl) {
-    console.error('No server URL found in API spec.');
-    console.error('If the spec uses a relative URL, you may need to configure a base URL.');
-    process.exit(1);
+    if (globalOpts.json) {
+      console.log(JSON.stringify({ error: { type: 'config', message: 'No server URL found in API spec.' } }));
+    } else {
+      console.log(error('No server URL found in API spec'));
+      console.log('');
+      console.log(`    The spec may use a relative URL. Configure a base URL in your config.`);
+    }
+    process.exit(ExitCode.CONFIG_ERROR);
   }
 
   // Create execution context
@@ -432,7 +590,7 @@ async function runApiCli(apiName: string, args: string[]): Promise<void> {
     auth: auth || undefined,
     baseUrl,
     dryRun: flags.has('dry-run'),
-    verbose: flags.has('verbose') || flags.has('v'),
+    verbose: globalOpts.verbose || flags.has('verbose') || flags.has('v'),
     profileName,
   };
 
@@ -455,8 +613,20 @@ async function runApiCli(apiName: string, args: string[]): Promise<void> {
     // Format output based on flags
     const outputFormat = flags.get('output') as 'json' | 'table' | undefined;
     const fieldPath = flags.get('field');
+
+    // Quiet mode: only output data for successful requests
+    if (globalOpts.quiet && status >= 200 && status < 300) {
+      if (fieldPath) {
+        const extracted = formatOutput(data, { format: 'json', field: fieldPath, pretty: false });
+        console.log(extracted);
+      } else {
+        console.log(JSON.stringify(data));
+      }
+      return;
+    }
+
     const output = formatOutput(data, {
-      format: outputFormat || 'json',
+      format: outputFormat || (globalOpts.json ? 'json' : 'json'),
       field: fieldPath,
       pretty: !flags.has('compact'),
     });
@@ -465,17 +635,25 @@ async function runApiCli(apiName: string, args: string[]): Promise<void> {
 
     // Exit with error code for non-2xx responses
     if (status < 200 || status >= 300) {
-      process.exit(1);
+      process.exit(ExitCode.GENERAL_ERROR);
     }
-  } catch (error) {
-    const { message, exitCode } = formatError(error);
-    console.error(message);
-    process.exit(exitCode);
+  } catch (err) {
+    if (globalOpts.json) {
+      console.log(JSON.stringify(formatErrorJson(err)));
+    } else {
+      const { message, exitCode } = formatError(err);
+      console.error(message);
+    }
+    process.exit(err instanceof ClxError ? err.exitCode : ExitCode.GENERAL_ERROR);
   }
 }
 
 // Run
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
+main().then(() => {
+  // Check for updates after successful execution
+  checkForUpdates();
+}).catch((err) => {
+  const { message, exitCode } = formatError(err);
+  console.error(message);
+  process.exit(exitCode);
 });
