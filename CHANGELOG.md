@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-01-10
+
+### Added
+- Non-interactive authentication via environment variables (`STRIPE_API_KEY`, `GITHUB_TOKEN`, `CLX_<API>_TOKEN`)
+- Custom header flag (`-H` / `--header`) for arbitrary HTTP headers
+- `--token` flag for inline token authentication
+- `--fields` flag for multi-field selection in output
+- `--ids` flag for extracting just IDs from responses
+- Unknown command detection with "Did you mean?" suggestions
+- Input validation for required parameters, JSON data, and schema constraints
+- Help examples now include all required parameters
+
+### Changed
+- Improved OpenAPI parameter reference (`$ref`) resolution
+- Doctor `--fix` now creates missing symlinks
+- Improved error messages with actionable hints
+
+### Fixed
+- Path parameters not substituted when using `$ref` in OpenAPI specs
+- Empty required parameters now rejected with helpful error
+- Compact output mode preserves newlines in string values
+
+## [0.1.2] - 2026-01-09
+
+### Added
+- Adapter system for API-specific configuration
+- Commander-based CLI argument parsing
+
+### Fixed
+- Bun compiled binary argument handling
+- Version constant now read from package.json
+
 ## [0.1.0] - 2025-01-09
 
 ### Added
@@ -30,7 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Structured error messages with hints
 - Path traversal prevention for API names
 - Token masking in verbose and dry-run output
-- Registry with 8 popular APIs: Stripe, GitHub, OpenAI, Anthropic, Slack, Twilio, Discord, Petstore
+- Bundled adapters for Stripe, GitHub, and Petstore APIs
 
 ### Security
 - Auth credentials stored with restricted file permissions
