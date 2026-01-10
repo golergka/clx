@@ -17,6 +17,7 @@ import { formatError, formatErrorJson, ExitCode, ClxError, UsageError, suggestCo
 import { success, warning, error, info, bold, dim, cyan, confirm, isTTY, box } from './ui.js';
 import { checkForUpdates, getVersion } from './update.js';
 import { loadAdapter, hasBundledAdapter, getAdapterBaseUrl, listAvailableApis, listInstalledApis, downloadSpec, isSpecInstalled, removeSpec as removeSpecFile, getUserBinDir } from './adapter-loader.js';
+import { ensureBinDir, isPathConfigured, createApiSymlink, removeApiSymlink } from './checks.js';
 import type { ResolvedAdapter } from './core/index.js';
 
 const VERSION = getVersion();
@@ -214,26 +215,34 @@ async function handleClxCommands(args: string[], globalOpts: GlobalOptions): Pro
         process.exit(ExitCode.NETWORK_ERROR);
       }
 
-      // Create symlink
-      const binDir = getUserBinDir();
-      if (!fs.existsSync(binDir)) {
-        fs.mkdirSync(binDir, { recursive: true });
-      }
-      const symlinkPath = path.join(binDir, apiName);
-      const clxPath = process.argv[1];
-      try {
-        if (fs.existsSync(symlinkPath)) {
-          fs.unlinkSync(symlinkPath);
+      // Ensure bin directory exists and is writable
+      if (!ensureBinDir()) {
+        if (!globalOpts.quiet) {
+          console.log(warning(`Bin directory not writable`));
+          console.log(dim(`  Run 'clx doctor' to diagnose`));
         }
-        fs.symlinkSync(clxPath, symlinkPath);
-      } catch {
-        // Symlink creation failed, not critical
+      }
+
+      // Create symlink
+      const symlinkCreated = createApiSymlink(apiName);
+      if (!symlinkCreated && !globalOpts.quiet) {
+        console.log(warning(`Could not create symlink`));
+        console.log(dim(`  Run 'clx doctor --fix' to diagnose`));
       }
 
       if (globalOpts.json) {
-        console.log(JSON.stringify({ status: 'installed', api: apiName }));
+        console.log(JSON.stringify({ status: 'installed', api: apiName, symlink: symlinkCreated }));
       } else {
         console.log(success(`Installed ${apiName}`));
+
+        // Check if bin dir is in PATH
+        if (!isPathConfigured()) {
+          console.log('');
+          console.log(warning(`~/.clx/bin is not in your PATH`));
+          console.log('');
+          console.log(`  Run 'clx setup' to fix this, or add manually:`);
+          console.log(dim(`    export PATH="$HOME/.clx/bin:$PATH"`));
+        }
       }
       return true;
     }
@@ -269,15 +278,7 @@ async function handleClxCommands(args: string[], globalOpts: GlobalOptions): Pro
       removeSpecFile(apiName);
 
       // Remove symlink
-      const binDir = getUserBinDir();
-      const symlinkPath = path.join(binDir, apiName);
-      try {
-        if (fs.existsSync(symlinkPath)) {
-          fs.unlinkSync(symlinkPath);
-        }
-      } catch {
-        // Symlink removal failed, not critical
-      }
+      removeApiSymlink(apiName);
 
       if (globalOpts.json) {
         console.log(JSON.stringify({ status: 'removed', api: apiName }));

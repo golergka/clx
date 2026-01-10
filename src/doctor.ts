@@ -2,17 +2,13 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { getConfigDir, getSpecsDir, getAuthDir, getBinDir, listInstalledSpecs, loadAuth } from './config.js';
-import { isInPath } from './setup.js';
-import { success, warning, error, bold, dim, cyan, green, yellow, red, symbols } from './ui.js';
+import { getConfigDir, loadAuth } from './config.js';
+import { listInstalledApis } from './adapter-loader.js';
+import { bold, dim, cyan, green, yellow, red, symbols } from './ui.js';
 import { getVersion } from './update.js';
+import { CheckResult, checkPath, checkBinDir, checkSymlinks } from './checks.js';
 
-export interface CheckResult {
-  name: string;
-  status: 'ok' | 'warn' | 'error';
-  message: string;
-  hint?: string;
-}
+export type { CheckResult } from './checks.js';
 
 export interface DoctorOptions {
   json?: boolean;
@@ -45,12 +41,15 @@ export async function runDiagnostics(options: DoctorOptions = {}): Promise<Check
   results.push(checkConfigDir());
 
   // Check installed APIs and auth
-  const { apisCheck, authChecks } = checkInstalledApis();
+  const { apisCheck, authChecks } = checkInstalledApisAuth();
   results.push(apisCheck);
   results.push(...authChecks);
 
   // Check network connectivity
   results.push(await checkNetwork());
+
+  // Check bin directory writable
+  results.push(checkBinDir());
 
   // Check symlinks
   const symlinkResult = checkSymlinks(options.fix);
@@ -60,26 +59,6 @@ export async function runDiagnostics(options: DoctorOptions = {}): Promise<Check
   results.push(checkDiskSpace());
 
   return results;
-}
-
-// Check if bin directory is in PATH
-function checkPath(): CheckResult {
-  const binDir = getBinDir();
-
-  if (isInPath(binDir)) {
-    return {
-      name: 'PATH includes ~/.clx/bin',
-      status: 'ok',
-      message: binDir,
-    };
-  }
-
-  return {
-    name: 'PATH',
-    status: 'warn',
-    message: `${binDir} not in PATH`,
-    hint: `Run 'clx setup' to add it`,
-  };
 }
 
 // Check config directory exists and is writable
@@ -115,8 +94,8 @@ function checkConfigDir(): CheckResult {
 }
 
 // Check installed APIs and their auth status
-function checkInstalledApis(): { apisCheck: CheckResult; authChecks: CheckResult[] } {
-  const specs = listInstalledSpecs();
+function checkInstalledApisAuth(): { apisCheck: CheckResult; authChecks: CheckResult[] } {
+  const specs = listInstalledApis();
   const authChecks: CheckResult[] = [];
 
   if (specs.length === 0) {
@@ -216,98 +195,6 @@ async function checkNetwork(): Promise<CheckResult> {
       hint: 'Check your internet connection',
     };
   }
-}
-
-// Check symlinks are valid
-function checkSymlinks(fix = false): CheckResult {
-  const binDir = getBinDir();
-  const specs = listInstalledSpecs();
-
-  if (specs.length === 0) {
-    return {
-      name: 'Symlinks',
-      status: 'ok',
-      message: 'No symlinks to check',
-    };
-  }
-
-  const broken: string[] = [];
-  const orphaned: string[] = [];
-
-  for (const spec of specs) {
-    const symlinkPath = path.join(binDir, spec);
-
-    try {
-      if (!fs.existsSync(symlinkPath)) {
-        broken.push(spec);
-        continue;
-      }
-
-      const stats = fs.lstatSync(symlinkPath);
-      if (stats.isSymbolicLink()) {
-        const target = fs.readlinkSync(symlinkPath);
-        // Check if target exists (for real files, not bun virtual paths)
-        if (!target.startsWith('/$') && !fs.existsSync(target)) {
-          broken.push(spec);
-        }
-      }
-    } catch {
-      broken.push(spec);
-    }
-  }
-
-  // Check for orphaned symlinks (symlinks without specs)
-  if (fs.existsSync(binDir)) {
-    try {
-      const files = fs.readdirSync(binDir);
-      for (const file of files) {
-        const filePath = path.join(binDir, file);
-        const stats = fs.lstatSync(filePath);
-        if (stats.isSymbolicLink()) {
-          const target = fs.readlinkSync(filePath);
-          if (target.includes('clx') && !specs.includes(file) && file !== 'clx') {
-            orphaned.push(file);
-            if (fix) {
-              fs.unlinkSync(filePath);
-            }
-          }
-        }
-      }
-    } catch {
-      // Ignore errors reading bin dir
-    }
-  }
-
-  if (broken.length > 0) {
-    return {
-      name: 'Symlinks',
-      status: 'warn',
-      message: `Missing: ${broken.join(', ')}`,
-      hint: `Run 'clx install ${broken[0]}' to fix`,
-    };
-  }
-
-  if (orphaned.length > 0) {
-    if (fix) {
-      return {
-        name: 'Symlinks',
-        status: 'ok',
-        message: `Fixed: removed ${orphaned.length} orphaned symlink(s)`,
-      };
-    }
-    return {
-      name: 'Symlinks',
-      status: 'warn',
-      message: `Orphaned: ${orphaned.join(', ')}`,
-      hint: `Run 'clx doctor --fix' to remove`,
-    };
-  }
-
-  return {
-    name: 'Symlinks',
-    status: 'ok',
-    message: `${specs.length} symlink(s) valid`,
-  };
 }
 
 // Basic disk space check
