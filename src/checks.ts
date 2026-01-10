@@ -82,13 +82,25 @@ export function checkSymlinks(fix = false): CheckResult {
 
   const broken: string[] = [];
   const orphaned: string[] = [];
+  const fixed: string[] = [];
+  const fixErrors: string[] = [];
 
   for (const spec of specs) {
     const symlinkPath = path.join(binDir, spec);
 
     try {
       if (!fs.existsSync(symlinkPath)) {
-        broken.push(spec);
+        if (fix) {
+          // Try to create the missing symlink
+          const result = createApiSymlink(spec);
+          if (result.success) {
+            fixed.push(spec);
+          } else {
+            fixErrors.push(`${spec}: ${result.error}`);
+          }
+        } else {
+          broken.push(spec);
+        }
         continue;
       }
 
@@ -97,7 +109,17 @@ export function checkSymlinks(fix = false): CheckResult {
         const target = fs.readlinkSync(symlinkPath);
         // Check if target exists (for real files, not bun virtual paths)
         if (!target.startsWith('/$') && !fs.existsSync(target)) {
-          broken.push(spec);
+          if (fix) {
+            // Try to recreate the broken symlink
+            const result = createApiSymlink(spec);
+            if (result.success) {
+              fixed.push(spec);
+            } else {
+              fixErrors.push(`${spec}: ${result.error}`);
+            }
+          } else {
+            broken.push(spec);
+          }
         }
       }
     } catch {
@@ -127,23 +149,38 @@ export function checkSymlinks(fix = false): CheckResult {
     }
   }
 
+  // Report results
+  if (fix) {
+    if (fixErrors.length > 0) {
+      return {
+        name: 'Symlinks',
+        status: 'error',
+        message: `Fixed ${fixed.length}, failed ${fixErrors.length}`,
+        hint: fixErrors.join('; '),
+      };
+    }
+    if (fixed.length > 0 || orphaned.length > 0) {
+      const parts = [];
+      if (fixed.length > 0) parts.push(`created ${fixed.length}`);
+      if (orphaned.length > 0) parts.push(`removed ${orphaned.length} orphaned`);
+      return {
+        name: 'Symlinks',
+        status: 'ok',
+        message: `Fixed: ${parts.join(', ')}`,
+      };
+    }
+  }
+
   if (broken.length > 0) {
     return {
       name: 'Symlinks',
       status: 'warn',
       message: `Missing: ${broken.join(', ')}`,
-      hint: `Run 'clx install ${broken[0]}' to fix`,
+      hint: `Run 'clx doctor --fix' to create missing symlinks`,
     };
   }
 
   if (orphaned.length > 0) {
-    if (fix) {
-      return {
-        name: 'Symlinks',
-        status: 'ok',
-        message: `Fixed: removed ${orphaned.length} orphaned symlink(s)`,
-      };
-    }
     return {
       name: 'Symlinks',
       status: 'warn',
@@ -179,9 +216,9 @@ export function isPathConfigured(): boolean {
 
 /**
  * Create symlink for an API
- * Returns true if successful
+ * Returns object with success status and optional error message
  */
-export function createApiSymlink(apiName: string): boolean {
+export function createApiSymlink(apiName: string): { success: boolean; error?: string } {
   const binDir = getUserBinDir();
   const symlinkPath = path.join(binDir, apiName);
 
@@ -198,13 +235,40 @@ export function createApiSymlink(apiName: string): boolean {
   }
 
   try {
+    // Ensure bin dir exists
+    if (!fs.existsSync(binDir)) {
+      fs.mkdirSync(binDir, { recursive: true });
+    }
+
+    // Check if file exists (not symlink)
     if (fs.existsSync(symlinkPath)) {
+      const stats = fs.lstatSync(symlinkPath);
+      if (!stats.isSymbolicLink()) {
+        return {
+          success: false,
+          error: `File already exists at ${symlinkPath} (not a symlink). Remove it manually: rm ${symlinkPath}`,
+        };
+      }
       fs.unlinkSync(symlinkPath);
     }
+
     fs.symlinkSync(clxPath, symlinkPath);
-    return true;
-  } catch {
-    return false;
+    return { success: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('EACCES')) {
+      return {
+        success: false,
+        error: `Permission denied writing to ${binDir}. Try: chmod 755 ${binDir}`,
+      };
+    }
+    if (msg.includes('ENOENT')) {
+      return {
+        success: false,
+        error: `clx binary not found at ${clxPath}. Reinstall clx.`,
+      };
+    }
+    return { success: false, error: msg };
   }
 }
 

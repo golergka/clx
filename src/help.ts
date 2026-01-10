@@ -126,14 +126,52 @@ export function generateOperationHelp(
     lines.push('');
   }
 
-  // Examples
+  // Examples - include all required parameters
   lines.push('Examples:');
-  lines.push(`  ${fullCommand}${pathParams.length > 0 ? ` --${pathParams[0].name}=<value>` : ''}`);
+  const requiredParams = allParams.filter(p => p.required);
+  let exampleCmd = fullCommand;
+  for (const param of requiredParams) {
+    const placeholder = getExamplePlaceholder(param);
+    exampleCmd += ` --${param.name}=${placeholder}`;
+  }
+  lines.push(`  ${exampleCmd}`);
   if (opInfo.method !== 'get') {
-    lines.push(`  ${fullCommand} --data='{"key":"value"}'`);
+    lines.push(`  ${exampleCmd} --data='{"key":"value"}'`);
   }
 
   return lines.join('\n');
+}
+
+// Generate realistic placeholder based on parameter name/schema
+function getExamplePlaceholder(param: Parameter): string {
+  const name = param.name.toLowerCase();
+  const schema = param.schema;
+
+  // Common parameter name patterns
+  if (name === 'email' || name.includes('email')) return '"user@example.com"';
+  if (name === 'id' || name.endsWith('_id') || name.endsWith('id')) return '<id>';
+  if (name === 'owner') return '"octocat"';
+  if (name === 'repo') return '"hello-world"';
+  if (name === 'username') return '"username"';
+  if (name === 'name') return '"name"';
+  if (name === 'query' || name === 'q') return '"search term"';
+  if (name === 'limit' || name === 'per_page') return '10';
+  if (name === 'page') return '1';
+
+  // Schema-based placeholders
+  if (schema) {
+    if (schema.enum && schema.enum.length > 0) {
+      return String(schema.enum[0]);
+    }
+    if (schema.type === 'integer' || schema.type === 'number') {
+      return schema.minimum !== undefined ? String(schema.minimum) : '123';
+    }
+    if (schema.type === 'boolean') {
+      return 'true';
+    }
+  }
+
+  return `<${param.name}>`;
 }
 
 // Truncate description to keep help concise
