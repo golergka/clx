@@ -12,39 +12,111 @@ function methodToCommand(method: string): string {
   return mapping[method] || method;
 }
 
+// Normalize operationId to detect patterns
+function normalizeOperationId(operationId: string): string {
+  return operationId
+    .replace(/([a-z])([A-Z])/g, '$1 $2')  // camelCase: GetCustomers -> Get Customers
+    .replace(/[/_-]/g, ' ')                // separators: meta/get-zen -> meta get zen
+    .toLowerCase()
+    .trim();
+}
+
+// Check if path ends with a parameter (e.g., /customers/{id})
+function hasIdParameter(pathSegments?: string[]): boolean {
+  if (!pathSegments || pathSegments.length === 0) return false;
+  const lastSegment = pathSegments[pathSegments.length - 1];
+  return lastSegment.startsWith('{');
+}
+
+// Check if operation returns an array (collection) vs single value
+function doesOperationReturnArray(operation?: Operation): boolean {
+  if (!operation?.responses) return false;
+
+  // Check 200 or 201 response
+  const successResponse = operation.responses['200'] || operation.responses['201'];
+  if (!successResponse) return false;
+
+  // Get content schema
+  const content = successResponse.content;
+  if (!content) return false;
+
+  const jsonContent = content['application/json'];
+  if (!jsonContent?.schema) return false;
+
+  const schema = jsonContent.schema;
+
+  // Check if schema is array type
+  if (schema.type === 'array') return true;
+  if (schema.items !== undefined) return true;
+
+  // Check for common list response patterns (data array wrapper)
+  if (schema.properties?.data?.type === 'array') return true;
+  if (schema.properties?.items?.type === 'array') return true;
+  if (schema.properties?.results?.type === 'array') return true;
+
+  return false;
+}
+
 // Infer a better command name from operationId or path
-function inferCommandName(method: string, operationId?: string, pathSegments?: string[]): string {
+function inferCommandName(method: string, operationId?: string, pathSegments?: string[], operation?: Operation): string {
+  const hasId = hasIdParameter(pathSegments);
+  const returnsArray = doesOperationReturnArray(operation);
+
   if (operationId) {
-    // Common patterns: getCustomer, createCustomer, listCustomers, deleteCustomer
-    const lower = operationId.toLowerCase();
-    if (lower.startsWith('list') || lower.startsWith('getall') || lower.endsWith('list')) {
+    const normalized = normalizeOperationId(operationId);
+
+    // Explicit action patterns (list, create, etc.)
+    if (/\b(list|get-?all|find-?all|search)\b/i.test(normalized)) {
       return 'list';
     }
-    if (lower.startsWith('get') || lower.startsWith('retrieve') || lower.startsWith('fetch')) {
-      return 'get';
-    }
-    if (lower.startsWith('create') || lower.startsWith('add') || lower.startsWith('new')) {
+    if (/\b(create|add|new)\b/i.test(normalized) && !hasId) {
       return 'create';
     }
-    if (lower.startsWith('update') || lower.startsWith('modify') || lower.startsWith('edit') || lower.startsWith('patch')) {
+    if (/\b(update|modify|edit|patch|put)\b/i.test(normalized)) {
       return 'update';
     }
-    if (lower.startsWith('delete') || lower.startsWith('remove') || lower.startsWith('destroy')) {
+    if (/\b(delete|remove|destroy)\b/i.test(normalized)) {
       return 'delete';
+    }
+    if (/\b(retrieve|fetch)\b/i.test(normalized)) {
+      return 'get';
+    }
+
+    // Handle operationIds that start with HTTP method (e.g., "GetUsers", "PostOrders")
+    // Use path structure to determine the actual action
+    const httpMethodMatch = normalized.match(/^(get|post|put|patch|delete)\s+(.+)/);
+    if (httpMethodMatch) {
+      const httpMethod = httpMethodMatch[1];
+      // Use path structure to determine action
+      if (hasId) {
+        // Has ID param - get, update, or delete
+        if (httpMethod === 'get') return 'get';
+        if (httpMethod === 'post' || httpMethod === 'put' || httpMethod === 'patch') return 'update';
+        if (httpMethod === 'delete') return 'delete';
+      } else {
+        // Collection endpoint - check if returns array
+        if (httpMethod === 'get') return returnsArray ? 'list' : 'get';
+        if (httpMethod === 'post') return 'create';
+      }
+    }
+
+    // Handle patterns like "get" alone (for single-value endpoints)
+    if (normalized === 'get' || /^get\s*$/.test(normalized)) {
+      return 'get';  // Single-value endpoint
     }
   }
 
-  // Check if path ends with a parameter (e.g., /customers/{id})
+  // Fallback: use HTTP method + path structure + response schema
   if (pathSegments && pathSegments.length > 0) {
-    const lastSegment = pathSegments[pathSegments.length - 1];
-    if (lastSegment.startsWith('{')) {
+    if (hasId) {
       // Path has an ID parameter
       if (method === 'get') return 'get';
       if (method === 'put' || method === 'patch') return 'update';
+      if (method === 'post') return 'update';  // POST with ID is often update
       if (method === 'delete') return 'delete';
     } else {
-      // Path is a collection endpoint
-      if (method === 'get') return 'list';
+      // Collection endpoint - check response schema
+      if (method === 'get') return returnsArray ? 'list' : 'get';
       if (method === 'post') return 'create';
     }
   }
@@ -114,7 +186,7 @@ export function buildCommandTree(spec: OpenAPISpec): CommandNode {
       }
 
       // Determine command name for this operation
-      const commandName = inferCommandName(method, operation.operationId, segments);
+      const commandName = inferCommandName(method, operation.operationId, segments, operation);
 
       // Collect all parameters (path-level + operation-level)
       const allParams: Parameter[] = [
@@ -170,31 +242,50 @@ export function resolveRef<T>(spec: OpenAPISpec, ref: string): T | null {
   return current as T;
 }
 
+// Validate if a string is a valid URL
+function isValidUrl(url: string): boolean {
+  try {
+    new URL(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Get the base URL from the spec
 export function getBaseUrl(spec: OpenAPISpec, defaultHost?: string): string {
+  // If override provided, use it
+  if (defaultHost) {
+    // Remove trailing slash
+    return defaultHost.replace(/\/$/, '');
+  }
+
   if (spec.servers && spec.servers.length > 0) {
     let url = spec.servers[0].url;
 
-    // Resolve server variables
+    // Resolve server variables (e.g., {basePath}, {version})
     const variables = spec.servers[0].variables;
     if (variables) {
-      for (const [key, value] of Object.entries(variables)) {
-        url = url.replace(`{${key}}`, value.default);
+      for (const [key, variable] of Object.entries(variables)) {
+        const value = variable.default || (variable.enum ? variable.enum[0] : '');
+        url = url.replace(`{${key}}`, value);
       }
     }
 
     // Handle relative URLs
     if (url.startsWith('/')) {
-      // If we have a default host (from config or registry), use it
-      if (defaultHost) {
-        return defaultHost + url;
-      }
-      // Otherwise, try to infer from common patterns
-      // This is a fallback for specs that don't include full URLs
-      return url;
+      // Relative URL needs a base - return empty to trigger error
+      return '';
     }
 
-    return url;
+    // Validate URL format
+    if (!isValidUrl(url)) {
+      // Invalid URL - return empty to trigger error
+      return '';
+    }
+
+    // Remove trailing slash
+    return url.replace(/\/$/, '');
   }
 
   return '';

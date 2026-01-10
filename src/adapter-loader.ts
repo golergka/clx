@@ -170,6 +170,16 @@ export function loadAdapter(name: string): ResolvedAdapter | null {
   return resolved;
 }
 
+// Validate if a string is a valid absolute URL
+function isValidAbsoluteUrl(url: string): boolean {
+  try {
+    new URL(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Get the base URL for an adapter
  */
@@ -177,15 +187,30 @@ export function getAdapterBaseUrl(adapter: ResolvedAdapter, ctx?: { profile?: st
   // Static or dynamic baseUrl from adapter
   if (adapter.baseUrl) {
     if (typeof adapter.baseUrl === 'function') {
-      return adapter.baseUrl(ctx || {});
+      const url = adapter.baseUrl(ctx || {});
+      return url && isValidAbsoluteUrl(url) ? url.replace(/\/$/, '') : null;
     }
-    return adapter.baseUrl;
+    return isValidAbsoluteUrl(adapter.baseUrl) ? adapter.baseUrl.replace(/\/$/, '') : null;
   }
 
-  // Fall back to spec's servers
+  // Fall back to spec's servers - but only if it's an absolute URL
   const servers = adapter.specData.servers;
   if (servers && servers.length > 0) {
-    return servers[0].url;
+    let url = servers[0].url;
+
+    // Resolve server variables
+    const variables = servers[0].variables;
+    if (variables) {
+      for (const [key, variable] of Object.entries(variables)) {
+        const value = variable.default || (variable.enum ? variable.enum[0] : '');
+        url = url.replace(`{${key}}`, value);
+      }
+    }
+
+    // Only return if it's a valid absolute URL
+    if (isValidAbsoluteUrl(url)) {
+      return url.replace(/\/$/, '');
+    }
   }
 
   return null;

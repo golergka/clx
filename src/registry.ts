@@ -29,7 +29,7 @@ const REGISTRY: Record<string, RegistryEntry> = {
   'petstore': {
     url: 'https://petstore3.swagger.io/api/v3/openapi.json',
     description: 'Swagger Petstore (demo API)',
-    baseUrl: 'https://petstore3.swagger.io',
+    baseUrl: 'https://petstore3.swagger.io/api/v3',
   },
   'slack': {
     url: 'https://raw.githubusercontent.com/slackapi/slack-api-specs/master/web-api/slack_web_openapi_v2.json',
