@@ -3,3 +3,4 @@ dist/
 clx
 *.log
 .DS_Store
+.claude/ralph-loop.local.md
