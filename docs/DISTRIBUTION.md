@@ -4,7 +4,7 @@
 
 Get `clx` installable via:
 ```bash
-npm install -g @clx/cli      # Phase 1 (now)
+npm install -g clx-cli      # Phase 1 (now)
 brew install clx        # Phase 2 (later)
 ```
 

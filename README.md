@@ -22,7 +22,7 @@ stripe auth login
 ### npm (recommended)
 
 ```bash
-npm install -g @clx/cli
+npm install -g clx-cli
 ```
 
 ### From Source (requires Bun)

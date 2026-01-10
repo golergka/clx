@@ -1,5 +1,5 @@
 {
-  "name": "@clx/cli",
+  "name": "clx-cli",
   "version": "0.1.0",
   "description": "CLI API client generator from OpenAPI specs",
   "type": "module",
@@ -43,9 +43,6 @@
   ],
   "engines": {
     "node": ">=18"
-  },
-  "publishConfig": {
-    "access": "public"
   },
   "dependencies": {
     "yaml": "^2.8.2"
