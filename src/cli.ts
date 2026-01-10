@@ -107,6 +107,34 @@ export function createClxProgram(): Command {
       handleCompletions(shell ? [shell] : []);
     });
 
+  // Help command - delegate to API help if topic is an installed API
+  program
+    .command('help [topic]')
+    .description('Show help for clx or an installed API')
+    .action(async (topic?: string) => {
+      if (topic) {
+        // Check if topic is an installed API
+        const installed = listInstalledApis();
+        if (installed.includes(topic)) {
+          // Import and run API CLI with --help
+          // This will be handled by index.ts runApiCli
+          console.log(`Run 'clx ${topic} --help' or '${topic} --help' to see API help`);
+          return;
+        }
+        // Check if it's a clx subcommand
+        const subcmd = program.commands.find(c => c.name() === topic);
+        if (subcmd) {
+          subcmd.outputHelp();
+          return;
+        }
+        console.log(error(`Unknown topic: ${topic}`));
+        console.log(`    Run 'clx --help' for available commands`);
+        console.log(`    Run 'clx list' to see installed APIs`);
+      } else {
+        program.outputHelp();
+      }
+    });
+
   return program;
 }
 
