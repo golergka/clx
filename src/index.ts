@@ -114,11 +114,19 @@ async function handleFirstRun(apiName?: string): Promise<boolean> {
 // Note: GlobalOptions is now imported from cli.ts
 // Note: handleClxCommands and printClxHelp replaced by commander-based CLI in cli.ts
 
+// Navigate result with optional error info
+interface NavigateResult {
+  node: CommandNode;
+  path: string[];
+  remaining: string[];
+  unknownCommand?: string;  // If set, an unknown command was encountered
+}
+
 // Navigate the command tree based on arguments
 function navigateTree(
   tree: CommandNode,
   args: string[]
-): { node: CommandNode; path: string[]; remaining: string[] } {
+): NavigateResult {
   let current = tree;
   const path: string[] = [];
   let i = 0;
@@ -141,6 +149,11 @@ function navigateTree(
       path.push(arg);
       i++;
       break;
+    }
+
+    // Unknown command - check if it looks like a command (not a flag value)
+    if (!arg.startsWith('-') && (current.children.size > 0 || current.operations.size > 0)) {
+      return { node: current, path, remaining: args.slice(i + 1), unknownCommand: arg };
     }
 
     break;
@@ -309,7 +322,34 @@ async function runApiCli(apiName: string, args: string[], globalOpts: GlobalOpti
   const showHelp = flags.has('help') || flags.has('h');
 
   // Navigate to the target node
-  const { node, path, remaining } = navigateTree(tree, positional);
+  const { node, path, remaining, unknownCommand } = navigateTree(tree, positional);
+
+  // Handle unknown command error
+  if (unknownCommand) {
+    const available = [...node.children.keys(), ...node.operations.keys()];
+    const suggestion = suggestCommand(unknownCommand, available);
+    const fullPath = path.length > 0 ? `${apiName} ${path.join(' ')}` : apiName;
+
+    if (globalOpts.json) {
+      console.log(JSON.stringify({
+        error: {
+          type: 'unknown_command',
+          command: unknownCommand,
+          suggestion,
+          available: available.slice(0, 10),
+        }
+      }));
+    } else {
+      console.log(error(`Unknown command: '${unknownCommand}'`));
+      if (suggestion) {
+        console.log(`    Did you mean '${cyan(suggestion)}'?`);
+      }
+      console.log('');
+      console.log(`    Available: ${available.slice(0, 5).join(', ')}${available.length > 5 ? '...' : ''}`);
+      console.log(`    Run '${cyan(`${fullPath} --help`)}' for all commands.`);
+    }
+    process.exit(ExitCode.USAGE_ERROR);
+  }
 
   // Parse remaining arguments
   const { flags: opFlags, customHeaders: opCustomHeaders } = parseArgs(remaining);

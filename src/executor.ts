@@ -1,6 +1,6 @@
 import type { ExecutionContext, OperationInfo, Parameter, AuthProfile, OpenAPISpec, Schema, RequestBody } from './types.js';
 import { resolveRef, getSecurityRequirements } from './parser.js';
-import { NetworkError, ApiError } from './errors.js';
+import { NetworkError, ApiError, UsageError } from './errors.js';
 
 interface RequestConfig {
   method: string;
@@ -171,6 +171,23 @@ export function buildRequest(
     processedParams.add(param.name);
 
     if (value !== undefined) {
+      // Validate non-empty for required params
+      if (param.required && (value === '' || value === 'true')) {
+        // 'true' means flag was present without value (--param vs --param=value)
+        throw new UsageError(
+          `Parameter --${param.name} cannot be empty`,
+          `Provide a value: --${param.name}=<value>`
+        );
+      }
+
+      // Validate against schema if present
+      if (param.schema) {
+        const schemaError = validateAgainstSchema(value, param.schema, param.name);
+        if (schemaError) {
+          throw new UsageError(schemaError);
+        }
+      }
+
       if (param.in === 'path') {
         pathParams.set(param.name, value);
       } else if (param.in === 'query') {
@@ -179,7 +196,10 @@ export function buildRequest(
         headers[param.name] = value;
       }
     } else if (param.required && param.in === 'path') {
-      throw new Error(`Missing required path parameter: ${param.name}`);
+      throw new UsageError(
+        `Missing required path parameter: --${param.name}`,
+        `Provide a value: --${param.name}=<value>`
+      );
     }
   }
 
@@ -219,10 +239,20 @@ export function buildRequest(
   const methodSupportsBody = ['post', 'put', 'patch', 'delete'].includes(opInfo.method);
 
   if (methodSupportsBody && dataFlag) {
-    body = dataFlag;
+    // Validate JSON data
+    const validation = validateJsonData(dataFlag);
+    if (!validation.valid) {
+      throw new UsageError(validation.error);
+    }
+    body = JSON.stringify(validation.parsed);  // Re-stringify for consistent formatting
     headers['Content-Type'] = 'application/json';
   } else if (methodSupportsBody && stdinData) {
-    body = stdinData;
+    // Validate stdin JSON data
+    const validation = validateJsonData(stdinData);
+    if (!validation.valid) {
+      throw new UsageError(validation.error.replace('--data', 'stdin'));
+    }
+    body = JSON.stringify(validation.parsed);
     headers['Content-Type'] = 'application/json';
   } else if (['post', 'put', 'patch'].includes(opInfo.method)) {
     // Build body from flags if there's a request body schema
@@ -305,6 +335,82 @@ function coerceValue(value: string, schema: Schema): unknown {
       }
     default:
       return value;
+  }
+}
+
+// Validate value against schema, return error message if invalid
+function validateAgainstSchema(value: string, schema: Schema, paramName: string): string | null {
+  // Type validation
+  switch (schema.type) {
+    case 'integer':
+      if (!/^-?\d+$/.test(value)) {
+        return `Parameter --${paramName}: Expected integer, got '${value}'`;
+      }
+      const intVal = parseInt(value, 10);
+      if (schema.minimum !== undefined && intVal < schema.minimum) {
+        return `Parameter --${paramName}: Value ${intVal} is below minimum ${schema.minimum}`;
+      }
+      if (schema.maximum !== undefined && intVal > schema.maximum) {
+        return `Parameter --${paramName}: Value ${intVal} is above maximum ${schema.maximum}`;
+      }
+      break;
+
+    case 'number':
+      if (!/^-?\d+\.?\d*$/.test(value)) {
+        return `Parameter --${paramName}: Expected number, got '${value}'`;
+      }
+      const numVal = parseFloat(value);
+      if (schema.minimum !== undefined && numVal < schema.minimum) {
+        return `Parameter --${paramName}: Value ${numVal} is below minimum ${schema.minimum}`;
+      }
+      if (schema.maximum !== undefined && numVal > schema.maximum) {
+        return `Parameter --${paramName}: Value ${numVal} is above maximum ${schema.maximum}`;
+      }
+      break;
+
+    case 'boolean':
+      if (!['true', 'false'].includes(value.toLowerCase())) {
+        return `Parameter --${paramName}: Expected boolean (true/false), got '${value}'`;
+      }
+      break;
+  }
+
+  // Enum validation
+  if (schema.enum && !schema.enum.includes(value)) {
+    return `Parameter --${paramName}: Value '${value}' not in allowed values: ${schema.enum.join(', ')}`;
+  }
+
+  // Pattern validation
+  if (schema.pattern) {
+    try {
+      const regex = new RegExp(schema.pattern);
+      if (!regex.test(value)) {
+        return `Parameter --${paramName}: Value doesn't match required pattern`;
+      }
+    } catch {
+      // Invalid regex in schema, skip validation
+    }
+  }
+
+  // String length validation
+  if (schema.minLength !== undefined && value.length < schema.minLength) {
+    return `Parameter --${paramName}: Value too short (min ${schema.minLength} chars)`;
+  }
+  if (schema.maxLength !== undefined && value.length > schema.maxLength) {
+    return `Parameter --${paramName}: Value too long (max ${schema.maxLength} chars)`;
+  }
+
+  return null;
+}
+
+// Validate and parse JSON data
+function validateJsonData(data: string): { valid: true; parsed: unknown } | { valid: false; error: string } {
+  try {
+    const parsed = JSON.parse(data);
+    return { valid: true, parsed };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : 'parse error';
+    return { valid: false, error: `Invalid JSON in --data: ${message}` };
   }
 }
 
