@@ -166,23 +166,111 @@ function truncate(str: string, maxLen: number): string {
   return str.substring(0, maxLen - 3) + '...';
 }
 
+// Select specific fields from data
+function selectFields(data: unknown, fields: string[]): unknown {
+  if (Array.isArray(data)) {
+    return data.map(item => selectFields(item, fields));
+  }
+
+  if (typeof data === 'object' && data !== null) {
+    const result: Record<string, unknown> = {};
+    const dataObj = data as Record<string, unknown>;
+
+    for (const field of fields) {
+      if (field.includes('.')) {
+        // Nested field: "owner.login"
+        const value = extractField(dataObj, field);
+        if (value !== undefined) {
+          setNestedField(result, field, value);
+        }
+      } else if (field in dataObj) {
+        result[field] = dataObj[field];
+      }
+    }
+    return result;
+  }
+
+  return data;
+}
+
+// Set a nested field value (e.g., "owner.login" -> { owner: { login: value } })
+function setNestedField(obj: Record<string, unknown>, path: string, value: unknown): void {
+  const parts = path.split('.');
+  let current = obj;
+
+  for (let i = 0; i < parts.length - 1; i++) {
+    const part = parts[i];
+    if (!(part in current) || typeof current[part] !== 'object') {
+      current[part] = {};
+    }
+    current = current[part] as Record<string, unknown>;
+  }
+
+  current[parts[parts.length - 1]] = value;
+}
+
+// Extract IDs/names from array
+function extractIds(data: unknown): string[] {
+  if (!Array.isArray(data)) {
+    if (typeof data === 'object' && data !== null) {
+      const obj = data as Record<string, unknown>;
+      return [String(obj.id ?? obj.name ?? JSON.stringify(data))];
+    }
+    return [String(data)];
+  }
+
+  return data.map(item => {
+    if (typeof item === 'object' && item !== null) {
+      const obj = item as Record<string, unknown>;
+      return String(obj.id ?? obj.name ?? JSON.stringify(item));
+    }
+    return String(item);
+  });
+}
+
 // Format output based on flags
 export function formatOutput(
   data: unknown,
   options: {
     format?: 'json' | 'table';
     field?: string;
+    fields?: string[];  // Multiple fields to select
     pretty?: boolean;
+    compact?: boolean;  // Single-line JSON
+    ids?: boolean;      // Extract just IDs
   } = {}
 ): string {
-  const { format = 'json', field, pretty = true } = options;
+  const { format = 'json', field, fields, pretty = true, compact = false, ids = false } = options;
 
-  // Extract field if specified
+  // Extract single field if specified
   let output = field ? extractField(data, field) : data;
+
+  // Select multiple fields if specified
+  if (fields && fields.length > 0) {
+    output = selectFields(output, fields);
+  }
+
+  // IDs-only mode
+  if (ids) {
+    return extractIds(output).join('\n');
+  }
 
   // Format based on output type
   if (format === 'table') {
     return formatTable(output);
+  }
+
+  // Plain string output - don't JSON.stringify (preserves newlines)
+  if (typeof output === 'string') {
+    return output;
+  }
+
+  // Compact JSON - one line per array item, or single line for objects
+  if (compact) {
+    if (Array.isArray(output)) {
+      return output.map(item => JSON.stringify(item)).join('\n');
+    }
+    return JSON.stringify(output);
   }
 
   // JSON output

@@ -451,22 +451,25 @@ async function runApiCli(apiName: string, args: string[], globalOpts: GlobalOpti
     // Format output based on flags
     const outputFormat = flags.get('output') as 'json' | 'table' | undefined;
     const fieldPath = flags.get('field');
+    const fieldsFlag = flags.get('fields');
+    const fields = fieldsFlag ? fieldsFlag.split(',').map(f => f.trim()) : undefined;
+    const compact = flags.has('compact');
+    const ids = flags.has('ids');
 
     // Quiet mode: only output data for successful requests
     if (globalOpts.quiet && status >= 200 && status < 300) {
-      if (fieldPath) {
-        const extracted = formatOutput(data, { format: 'json', field: fieldPath, pretty: false });
-        console.log(extracted);
-      } else {
-        console.log(JSON.stringify(data));
-      }
+      const extracted = formatOutput(data, { format: 'json', field: fieldPath, fields, pretty: false, compact: true, ids });
+      console.log(extracted);
       return;
     }
 
     const output = formatOutput(data, {
       format: outputFormat || (globalOpts.json ? 'json' : 'json'),
       field: fieldPath,
-      pretty: !flags.has('compact'),
+      fields,
+      pretty: !compact,
+      compact,
+      ids,
     });
 
     console.log(output);
