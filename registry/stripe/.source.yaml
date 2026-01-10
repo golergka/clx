@@ -1,6 +1,6 @@
 name: stripe
 source:
   url: https://raw.githubusercontent.com/stripe/openapi/master/openapi/spec3.yaml
-retrieved: null
-sha256: null
-size: null
+retrieved: 2026-01-10T03:06:13.457Z
+sha256: 743273d7a7b760c01927e299c38354e39d2b5adb00b8c4830a149198507e6a42
+size: 6008581

@@ -1,6 +1,6 @@
 name: github
 source:
   url: https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.yaml
-retrieved: null
-sha256: null
-size: null
+retrieved: 2026-01-10T03:06:08.236Z
+sha256: 12083e459753353ba763e09bfaadffe4b4950b5ed085cf9e0788e2c0969f78ec
+size: 8851814
