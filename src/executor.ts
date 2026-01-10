@@ -1,5 +1,6 @@
 import type { ExecutionContext, OperationInfo, Parameter, AuthProfile, OpenAPISpec, Schema, RequestBody } from './types.js';
 import { resolveRef, getSecurityRequirements } from './parser.js';
+import { NetworkError, ApiError } from './errors.js';
 
 interface RequestConfig {
   method: string;
@@ -157,14 +158,15 @@ export function buildRequest(
   // Build URL
   const url = buildUrl(ctx.baseUrl, opInfo.path, pathParams, queryParams);
 
-  // Handle request body
+  // Handle request body - only for methods that support it
   let body: string | undefined;
   const dataFlag = flags.get('data');
+  const methodSupportsBody = ['post', 'put', 'patch', 'delete'].includes(opInfo.method);
 
-  if (dataFlag) {
+  if (methodSupportsBody && dataFlag) {
     body = dataFlag;
     headers['Content-Type'] = 'application/json';
-  } else if (stdinData) {
+  } else if (methodSupportsBody && stdinData) {
     body = stdinData;
     headers['Content-Type'] = 'application/json';
   } else if (['post', 'put', 'patch'].includes(opInfo.method)) {
@@ -281,40 +283,164 @@ export function generateCurl(config: RequestConfig): string {
   return parts.join(' \\\n  ');
 }
 
-// Execute the HTTP request
-export async function executeRequest(config: RequestConfig, verbose: boolean): Promise<{ status: number; data: unknown }> {
-  if (verbose) {
-    console.error(`${config.method} ${config.url}`);
-    for (const [key, value] of Object.entries(config.headers)) {
-      if (key.toLowerCase() === 'authorization') {
-        console.error(`  ${key}: ${value.substring(0, 10)}...`);
-      } else {
-        console.error(`  ${key}: ${value}`);
+// Retry configuration
+interface RetryConfig {
+  maxRetries: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+  retryableStatuses: number[];
+}
+
+const DEFAULT_RETRY_CONFIG: RetryConfig = {
+  maxRetries: 3,
+  baseDelayMs: 1000,
+  maxDelayMs: 30000,
+  retryableStatuses: [429, 500, 502, 503, 504],
+};
+
+// Sleep helper
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Calculate exponential backoff with jitter
+function calculateBackoff(attempt: number, baseDelay: number, maxDelay: number): number {
+  const exponentialDelay = baseDelay * Math.pow(2, attempt);
+  const jitter = Math.random() * 0.3 * exponentialDelay; // 0-30% jitter
+  return Math.min(exponentialDelay + jitter, maxDelay);
+}
+
+// Parse retry-after header
+function parseRetryAfter(header: string | null): number | null {
+  if (!header) return null;
+
+  // Try parsing as seconds
+  const seconds = parseInt(header, 10);
+  if (!isNaN(seconds)) {
+    return seconds * 1000;
+  }
+
+  // Try parsing as HTTP date
+  const date = new Date(header);
+  if (!isNaN(date.getTime())) {
+    return Math.max(0, date.getTime() - Date.now());
+  }
+
+  return null;
+}
+
+// Execute the HTTP request with retry logic
+export async function executeRequest(
+  config: RequestConfig,
+  verbose: boolean,
+  retryConfig: Partial<RetryConfig> = {}
+): Promise<{ status: number; data: unknown }> {
+  const retry = { ...DEFAULT_RETRY_CONFIG, ...retryConfig };
+  let lastError: Error | null = null;
+  let lastResponse: Response | null = null;
+
+  for (let attempt = 0; attempt <= retry.maxRetries; attempt++) {
+    try {
+      if (verbose) {
+        console.error(`${config.method} ${config.url}${attempt > 0 ? ` (retry ${attempt})` : ''}`);
+        for (const [key, value] of Object.entries(config.headers)) {
+          if (key.toLowerCase() === 'authorization') {
+            console.error(`  ${key}: [REDACTED]`);
+          } else {
+            console.error(`  ${key}: ${value}`);
+          }
+        }
+        if (config.body) {
+          console.error(`  Body: ${config.body.substring(0, 100)}${config.body.length > 100 ? '...' : ''}`);
+        }
       }
+
+      // Create AbortController for timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
+
+      try {
+        const response = await fetch(config.url, {
+          method: config.method,
+          headers: config.headers,
+          body: config.body,
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+        lastResponse = response;
+
+        // Check if we should retry
+        if (retry.retryableStatuses.includes(response.status) && attempt < retry.maxRetries) {
+          const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
+          const delay = retryAfter || calculateBackoff(attempt, retry.baseDelayMs, retry.maxDelayMs);
+
+          if (verbose) {
+            console.error(`  Rate limited (${response.status}), retrying in ${Math.round(delay / 1000)}s...`);
+          }
+
+          await sleep(delay);
+          continue;
+        }
+
+        const contentType = response.headers.get('content-type') || '';
+        let data: unknown;
+
+        if (contentType.includes('application/json')) {
+          data = await response.json();
+        } else {
+          data = await response.text();
+        }
+
+        if (verbose) {
+          console.error(`Response: ${response.status} ${response.statusText}`);
+        }
+
+        return { status: response.status, data };
+
+      } catch (fetchError) {
+        clearTimeout(timeoutId);
+        throw fetchError;
+      }
+
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+
+      // Check if error is retryable
+      const isTimeout = lastError.name === 'AbortError' || lastError.message.includes('timeout');
+      const isNetworkError = lastError.message.includes('ECONNREFUSED') ||
+                            lastError.message.includes('ENOTFOUND') ||
+                            lastError.message.includes('ETIMEDOUT') ||
+                            lastError.message.includes('fetch failed');
+
+      if ((isTimeout || isNetworkError) && attempt < retry.maxRetries) {
+        const delay = calculateBackoff(attempt, retry.baseDelayMs, retry.maxDelayMs);
+
+        if (verbose) {
+          console.error(`  Network error, retrying in ${Math.round(delay / 1000)}s...`);
+        }
+
+        await sleep(delay);
+        continue;
+      }
+
+      // Not retryable or max retries exceeded
+      throw new NetworkError(
+        lastError.message,
+        'Check your internet connection and try again'
+      );
     }
-    if (config.body) {
-      console.error(`  Body: ${config.body.substring(0, 100)}${config.body.length > 100 ? '...' : ''}`);
-    }
   }
 
-  const response = await fetch(config.url, {
-    method: config.method,
-    headers: config.headers,
-    body: config.body,
-  });
-
-  const contentType = response.headers.get('content-type') || '';
-  let data: unknown;
-
-  if (contentType.includes('application/json')) {
-    data = await response.json();
-  } else {
-    data = await response.text();
+  // Should not reach here, but handle just in case
+  if (lastError) {
+    throw new NetworkError(lastError.message);
   }
 
-  if (verbose) {
-    console.error(`Response: ${response.status} ${response.statusText}`);
-  }
+  throw new NetworkError('Request failed after retries');
+}
 
-  return { status: response.status, data };
+// Execute request without retry (for cases where retry doesn't make sense)
+export async function executeRequestOnce(config: RequestConfig, verbose: boolean): Promise<{ status: number; data: unknown }> {
+  return executeRequest(config, verbose, { maxRetries: 0 });
 }

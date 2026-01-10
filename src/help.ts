@@ -134,13 +134,15 @@ export function generateOperationHelp(
       ? resolveRef(spec, requestBody.$ref)
       : requestBody;
 
-    if (body && 'content' in body) {
+    if (body && typeof body === 'object' && body !== null && 'content' in body) {
       lines.push('Request Body:');
-      const jsonContent = body.content['application/json'];
+      const bodyContent = body as { content: Record<string, { schema?: Schema }> };
+      const jsonContent = bodyContent.content['application/json'];
       if (jsonContent?.schema) {
-        const schema = '$ref' in jsonContent.schema
-          ? resolveRef<Schema>(spec, jsonContent.schema.$ref)
-          : jsonContent.schema;
+        const schemaEntry = jsonContent.schema as Schema;
+        const schema = schemaEntry.$ref
+          ? resolveRef<Schema>(spec, schemaEntry.$ref)
+          : schemaEntry;
 
         if (schema) {
           formatSchemaProperties(lines, schema, spec, '  ');

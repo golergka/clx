@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { OpenAPISpec } from './types.js';
 import { getSpecsDir, getBinDir, ensureConfigDirs, listInstalledSpecs, removeSpec, loadSpec } from './config.js';
+import { validateApiName, sanitizeFilename } from './errors.js';
 
 // Known API specs registry
 // In a real implementation, this would be fetched from a remote registry
@@ -21,7 +22,7 @@ const REGISTRY: Record<string, RegistryEntry> = {
     description: 'GitHub REST API',
   },
   'openai': {
-    url: 'https://raw.githubusercontent.com/openai/openai-openapi/master/openapi.yaml',
+    url: 'https://raw.githubusercontent.com/openai/openai-openapi/refs/heads/manual_spec/openapi.yaml',
     description: 'OpenAI API',
   },
   'petstore': {
@@ -41,17 +42,9 @@ const REGISTRY: Record<string, RegistryEntry> = {
     url: 'https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json',
     description: 'Discord API',
   },
-  'notion': {
-    url: 'https://raw.githubusercontent.com/NotionX/notion-api-spec/main/openapi.json',
-    description: 'Notion API',
-  },
   'anthropic': {
-    url: 'https://raw.githubusercontent.com/anthropics/anthropic-openapi/main/openapi.json',
-    description: 'Anthropic Claude API',
-  },
-  'linear': {
-    url: 'https://raw.githubusercontent.com/linear/linear-api-openapi/main/openapi.yaml',
-    description: 'Linear Project Management API',
+    url: 'https://raw.githubusercontent.com/laszukdawid/anthropic-openapi-spec/main/hosted_spec_v3.0.0.json',
+    description: 'Anthropic Claude API (unofficial)',
   },
 };
 
@@ -158,7 +151,8 @@ export async function installApi(nameOrUrl: string, customName?: string): Promis
   // Check if it's a URL
   if (nameOrUrl.startsWith('http://') || nameOrUrl.startsWith('https://')) {
     url = nameOrUrl;
-    apiName = customName || path.basename(nameOrUrl, path.extname(nameOrUrl));
+    apiName = sanitizeFilename(customName || path.basename(nameOrUrl, path.extname(nameOrUrl)));
+    validateApiName(apiName);
   } else if (nameOrUrl.endsWith('.yaml') || nameOrUrl.endsWith('.json') || nameOrUrl.endsWith('.yml')) {
     // Local file
     if (!fs.existsSync(nameOrUrl)) {
@@ -166,7 +160,8 @@ export async function installApi(nameOrUrl: string, customName?: string): Promis
       process.exit(1);
     }
 
-    apiName = customName || path.basename(nameOrUrl, path.extname(nameOrUrl));
+    apiName = sanitizeFilename(customName || path.basename(nameOrUrl, path.extname(nameOrUrl)));
+    validateApiName(apiName);
     const content = fs.readFileSync(nameOrUrl, 'utf-8');
 
     // Copy to specs directory
@@ -276,6 +271,10 @@ export function removeApi(apiName: string): void {
 
 // Add a local spec file
 export function addLocalSpec(filePath: string, name: string): void {
+  // Validate and sanitize the name
+  const sanitizedName = sanitizeFilename(name);
+  validateApiName(sanitizedName);
+
   if (!fs.existsSync(filePath)) {
     console.error(`File not found: ${filePath}`);
     process.exit(1);
@@ -284,11 +283,11 @@ export function addLocalSpec(filePath: string, name: string): void {
   ensureConfigDirs();
 
   const ext = path.extname(filePath);
-  const destPath = path.join(getSpecsDir(), `${name}${ext}`);
+  const destPath = path.join(getSpecsDir(), `${sanitizedName}${ext}`);
 
   fs.copyFileSync(filePath, destPath);
   console.log(`Added spec to ${destPath}`);
 
-  createSymlink(name);
-  console.log(`Created command '${name}'.`);
+  createSymlink(sanitizedName);
+  console.log(`Created command '${sanitizedName}'.`);
 }

@@ -3,12 +3,16 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import type { OpenAPISpec, CommandNode, ExecutionContext } from './types.js';
-import { loadSpec, getAuthProfile, ensureConfigDirs } from './config.js';
+import { loadSpec, getAuthProfile, ensureConfigDirs, listInstalledSpecs } from './config.js';
 import { buildCommandTree, getBaseUrl } from './parser.js';
 import { generateRootHelp, generateResourceHelp, generateOperationHelp } from './help.js';
 import { parseArgs, buildRequest, executeRequest, generateCurl } from './executor.js';
 import { authLogin, authStatus, authLogout, authList, authSwitch, ensureValidToken } from './auth.js';
 import { searchRegistry, installApi, listApis, updateApi, removeApi, addLocalSpec, getRegistryEntry } from './registry.js';
+import { formatOutput } from './output.js';
+import { runDiagnostics, printDiagnostics } from './doctor.js';
+import { generateCompletion } from './completions.js';
+import { formatError, ExitCode, ClxError, UsageError } from './errors.js';
 
 // Get API name from argv[0] (busybox pattern)
 function getApiName(): string {
@@ -105,11 +109,51 @@ async function handleClxCommands(args: string[]): Promise<boolean> {
       return true;
 
     case 'update': {
-      if (rest.length === 0) {
-        console.error('Usage: clx update <api>');
+      const { flags, positional } = parseArgs(rest);
+      if (flags.has('all')) {
+        // Update all installed APIs
+        const installed = listInstalledSpecs();
+        if (installed.length === 0) {
+          console.log('No APIs installed.');
+          return true;
+        }
+        console.log(`Updating ${installed.length} API(s)...`);
+        for (const api of installed) {
+          try {
+            await updateApi(api);
+          } catch (error) {
+            console.error(`Failed to update ${api}: ${error instanceof Error ? error.message : error}`);
+          }
+        }
+        return true;
+      }
+      if (positional.length === 0) {
+        console.error('Usage: clx update <api> or clx update --all');
         process.exit(1);
       }
-      await updateApi(rest[0]);
+      await updateApi(positional[0]);
+      return true;
+    }
+
+    case 'doctor': {
+      const results = await runDiagnostics();
+      printDiagnostics(results);
+      return true;
+    }
+
+    case 'completion': {
+      if (rest.length === 0) {
+        console.error('Usage: clx completion <bash|zsh|fish>');
+        console.error('Example: eval "$(clx completion bash)"');
+        process.exit(1);
+      }
+      try {
+        const script = generateCompletion(rest[0]);
+        console.log(script);
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : error);
+        process.exit(1);
+      }
       return true;
     }
 
@@ -156,8 +200,13 @@ Package Management:
   remove <api>        Remove an installed API
   list                List installed APIs
   update <api>        Update an API to latest version
+  update --all        Update all installed APIs
   search [query]      Search available APIs
   add <file> --name   Add a local OpenAPI spec
+
+Utilities:
+  doctor              Run diagnostic checks
+  completion <shell>  Generate shell completion (bash, zsh, fish)
 
 Options:
   --help              Show this help
@@ -169,10 +218,13 @@ Examples:
   clx add ./spec.yaml --name myapi
   clx list
   clx remove stripe
+  clx doctor
+  eval "$(clx completion bash)"
 
 After installing, use the API name as a command:
   stripe --help
-  stripe customers list
+  stripe customers list --output=table
+  stripe customers get cus_123 --field=email
 `);
 }
 
@@ -400,16 +452,25 @@ async function runApiCli(apiName: string, args: string[]): Promise<void> {
     // Execute request
     const { status, data } = await executeRequest(request, ctx.verbose);
 
-    // Output JSON to stdout
-    console.log(JSON.stringify(data, null, 2));
+    // Format output based on flags
+    const outputFormat = flags.get('output') as 'json' | 'table' | undefined;
+    const fieldPath = flags.get('field');
+    const output = formatOutput(data, {
+      format: outputFormat || 'json',
+      field: fieldPath,
+      pretty: !flags.has('compact'),
+    });
+
+    console.log(output);
 
     // Exit with error code for non-2xx responses
     if (status < 200 || status >= 300) {
       process.exit(1);
     }
   } catch (error) {
-    console.error(`Error: ${error instanceof Error ? error.message : error}`);
-    process.exit(1);
+    const { message, exitCode } = formatError(error);
+    console.error(message);
+    process.exit(exitCode);
   }
 }
 

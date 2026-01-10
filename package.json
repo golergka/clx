@@ -11,6 +11,7 @@
     "build": "bun build src/index.ts --outdir dist --target node",
     "dev": "bun run src/index.ts",
     "compile": "bun build src/index.ts --compile --outfile clx",
+    "typecheck": "tsc --noEmit",
     "test": "bun test"
   },
   "dependencies": {

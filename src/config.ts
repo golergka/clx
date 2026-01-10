@@ -27,10 +27,30 @@ export function getBinDir(): string {
 }
 
 export function ensureConfigDirs(): void {
-  const dirs = [getConfigDir(), getSpecsDir(), getAuthDir()];
-  for (const dir of dirs) {
+  const configDir = getConfigDir();
+  const specsDir = getSpecsDir();
+  const authDir = getAuthDir();
+
+  // Create config and specs dirs with default permissions
+  for (const dir of [configDir, specsDir]) {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
+    }
+  }
+
+  // Create auth dir with restricted permissions (700)
+  if (!fs.existsSync(authDir)) {
+    fs.mkdirSync(authDir, { recursive: true, mode: 0o700 });
+  } else {
+    // Ensure existing auth dir has correct permissions
+    try {
+      const stats = fs.statSync(authDir);
+      const mode = stats.mode & 0o777;
+      if (mode > 0o700) {
+        fs.chmodSync(authDir, 0o700);
+      }
+    } catch {
+      // Ignore chmod errors on platforms that don't support it
     }
   }
 }
