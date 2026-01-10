@@ -141,6 +141,12 @@ function applyAuth(
   }
 }
 
+// Known special flags that should not be passed as query parameters
+const SPECIAL_FLAGS = new Set([
+  'help', 'h', 'verbose', 'v', 'json', 'data', 'dry-run', 'profile',
+  'token', 'api-key', 'header', 'output', 'quiet', 'q', 'all'
+]);
+
 // Build request configuration from operation and arguments
 export function buildRequest(
   ctx: ExecutionContext,
@@ -155,12 +161,15 @@ export function buildRequest(
 
   const pathParams = new Map<string, string>();
   const queryParams = new Map<string, string>();
+  const processedParams = new Set<string>();
 
-  // Extract parameters from operation
-  const allParams = opInfo.operation.parameters || [];
+  // Use pre-resolved parameters from parser (refs already resolved)
+  const allParams = opInfo.resolvedParameters || opInfo.pathParameters || [];
 
   for (const param of allParams) {
     const value = flags.get(param.name);
+    processedParams.add(param.name);
+
     if (value !== undefined) {
       if (param.in === 'path') {
         pathParams.set(param.name, value);
@@ -171,6 +180,16 @@ export function buildRequest(
       }
     } else if (param.required && param.in === 'path') {
       throw new Error(`Missing required path parameter: ${param.name}`);
+    }
+  }
+
+  // Pass unknown flags as query parameters (but not special flags)
+  for (const [key, value] of flags) {
+    if (!processedParams.has(key) && !SPECIAL_FLAGS.has(key)) {
+      queryParams.set(key, value);
+      if (ctx.verbose) {
+        console.error(`  [info] Passing unknown parameter as query: ${key}=${value}`);
+      }
     }
   }
 

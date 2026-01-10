@@ -186,6 +186,8 @@ export interface OperationInfo {
   path: string;
   operation: Operation;
   pathParameters: Parameter[];
+  /** All resolved parameters (path + operation level, with refs resolved) */
+  resolvedParameters?: Parameter[];
 }
 
 // CLI execution context

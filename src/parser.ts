@@ -155,7 +155,15 @@ export function buildCommandTree(spec: OpenAPISpec): CommandNode {
     if (!pathItem) continue;
 
     const segments = parsePathSegments(path);
-    const pathParameters = pathItem.parameters || [];
+
+    // Resolve path-level parameter refs
+    const pathParameters: Parameter[] = (pathItem.parameters || []).map(param => {
+      if ('$ref' in param && param.$ref) {
+        const resolved = resolveRef<Parameter>(spec, param.$ref);
+        return resolved || param as Parameter;
+      }
+      return param as Parameter;
+    });
 
     // Process each HTTP method
     const methods = ['get', 'post', 'put', 'patch', 'delete'] as const;
@@ -188,10 +196,19 @@ export function buildCommandTree(spec: OpenAPISpec): CommandNode {
       // Determine command name for this operation
       const commandName = inferCommandName(method, operation.operationId, segments, operation);
 
+      // Resolve operation-level parameter refs and merge with path-level
+      const operationParams: Parameter[] = (operation.parameters || []).map(param => {
+        if ('$ref' in param && param.$ref) {
+          const resolved = resolveRef<Parameter>(spec, param.$ref);
+          return resolved || param as Parameter;
+        }
+        return param as Parameter;
+      });
+
       // Collect all parameters (path-level + operation-level)
       const allParams: Parameter[] = [
         ...pathParameters,
-        ...(operation.parameters || []),
+        ...operationParams,
       ];
 
       // Filter to get path parameters only
@@ -202,6 +219,7 @@ export function buildCommandTree(spec: OpenAPISpec): CommandNode {
         path,
         operation,
         pathParameters: pathParams,
+        resolvedParameters: allParams,
       };
 
       // If we're at root and no resource was found, add to root operations

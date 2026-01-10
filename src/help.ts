@@ -82,8 +82,8 @@ export function generateOperationHelp(
   lines.push(`${fullCommand} - ${opInfo.operation.summary || opInfo.method.toUpperCase()}`);
   lines.push('');
 
-  // Collect all parameters
-  const allParams = opInfo.operation.parameters || [];
+  // Use pre-resolved parameters from parser (refs already resolved)
+  const allParams = opInfo.resolvedParameters || opInfo.pathParameters || [];
 
   // Path parameters (required for the command)
   const pathParams = allParams.filter(p => p.in === 'path');
