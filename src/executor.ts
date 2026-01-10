@@ -10,9 +10,11 @@ interface RequestConfig {
 }
 
 // Parse command line arguments into a key-value map
-export function parseArgs(args: string[]): { flags: Map<string, string>; positional: string[] } {
+// Returns flags as Map and customHeaders as array (to support multiple -H)
+export function parseArgs(args: string[]): { flags: Map<string, string>; positional: string[]; customHeaders: Array<[string, string]> } {
   const flags = new Map<string, string>();
   const positional: string[] = [];
+  const customHeaders: Array<[string, string]> = [];
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -23,12 +25,26 @@ export function parseArgs(args: string[]): { flags: Map<string, string>; positio
         // --key=value
         const key = arg.substring(2, eqIndex);
         const value = arg.substring(eqIndex + 1);
-        flags.set(key, value);
+        // Handle --header specially
+        if (key === 'header') {
+          const colonIdx = value.indexOf(':');
+          if (colonIdx > 0) {
+            customHeaders.push([value.substring(0, colonIdx).trim(), value.substring(colonIdx + 1).trim()]);
+          }
+        } else {
+          flags.set(key, value);
+        }
       } else {
         // --key value or --flag
         const key = arg.substring(2);
         const nextArg = args[i + 1];
-        if (nextArg && !nextArg.startsWith('--')) {
+        if (key === 'header' && nextArg && !nextArg.startsWith('-')) {
+          const colonIdx = nextArg.indexOf(':');
+          if (colonIdx > 0) {
+            customHeaders.push([nextArg.substring(0, colonIdx).trim(), nextArg.substring(colonIdx + 1).trim()]);
+          }
+          i++;
+        } else if (nextArg && !nextArg.startsWith('--')) {
           flags.set(key, nextArg);
           i++;
         } else {
@@ -39,7 +55,14 @@ export function parseArgs(args: string[]): { flags: Map<string, string>; positio
       // -k value or -k
       const key = arg.substring(1);
       const nextArg = args[i + 1];
-      if (nextArg && !nextArg.startsWith('-')) {
+      // Handle -H for custom headers
+      if (key === 'H' && nextArg && !nextArg.startsWith('-')) {
+        const colonIdx = nextArg.indexOf(':');
+        if (colonIdx > 0) {
+          customHeaders.push([nextArg.substring(0, colonIdx).trim(), nextArg.substring(colonIdx + 1).trim()]);
+        }
+        i++;
+      } else if (nextArg && !nextArg.startsWith('-')) {
         flags.set(key, nextArg);
         i++;
       } else {
@@ -50,7 +73,7 @@ export function parseArgs(args: string[]): { flags: Map<string, string>; positio
     }
   }
 
-  return { flags, positional };
+  return { flags, positional, customHeaders };
 }
 
 // Build the full URL with path and query parameters
@@ -123,7 +146,8 @@ export function buildRequest(
   ctx: ExecutionContext,
   opInfo: OperationInfo,
   flags: Map<string, string>,
-  stdinData?: string
+  stdinData?: string,
+  customHeaders?: Array<[string, string]>
 ): RequestConfig {
   const headers: Record<string, string> = {
     'Accept': 'application/json',
@@ -150,9 +174,21 @@ export function buildRequest(
     }
   }
 
-  // Apply auth
-  if (ctx.auth) {
+  // Handle --token flag for auth override
+  const tokenFlag = flags.get('token') || flags.get('api-key');
+  if (tokenFlag) {
+    // Token flag overrides any auth - use as bearer token
+    headers['Authorization'] = `Bearer ${tokenFlag}`;
+  } else if (ctx.auth) {
+    // Apply auth from context
     applyAuth(ctx.auth, headers, queryParams);
+  }
+
+  // Apply custom headers (can override auth if needed)
+  if (customHeaders) {
+    for (const [key, value] of customHeaders) {
+      headers[key] = value;
+    }
   }
 
   // Build URL

@@ -12,9 +12,27 @@ import {
   getEnvApiKey,
   getApiConfig
 } from './config.js';
+import { loadAdapter } from './adapter-loader.js';
+import type { AdapterAuthConfig } from './core/index.js';
 
 // Interactive prompt helper
-async function prompt(question: string, hidden = false): Promise<string> {
+async function prompt(question: string, hidden = false, apiName?: string): Promise<string> {
+  // Check if we're in a TTY
+  if (!process.stdin.isTTY) {
+    const adapter = apiName ? loadAdapter(apiName) : null;
+    const envVarHint = adapter?.auth?.envVar
+      ? `  - Set ${adapter.auth.envVar} environment variable\n`
+      : `  - Set <API>_API_KEY environment variable\n`;
+
+    throw new Error(
+      'Interactive authentication requires a terminal.\n' +
+      'For non-interactive use:\n' +
+      envVarHint +
+      '  - Use --token=<value> flag\n' +
+      '  - Use -H "Authorization: Bearer <token>" for custom headers'
+    );
+  }
+
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -177,16 +195,95 @@ export async function refreshOAuth2Token(profile: AuthProfile, apiName: string, 
   }
 }
 
+/**
+ * Build an AuthProfile from an environment variable value based on adapter auth config
+ */
+function buildAuthProfileFromEnv(authConfig: AdapterAuthConfig | undefined, value: string): AuthProfile {
+  const type = authConfig?.type || 'bearer';
+
+  switch (type) {
+    case 'bearer':
+      return { type: 'bearer', bearerToken: value };
+
+    case 'apiKey':
+      return {
+        type: 'apiKey',
+        apiKey: value,
+        apiKeyHeader: authConfig?.header || 'Authorization',
+        apiKeyQuery: authConfig?.query,
+      };
+
+    case 'basic':
+      // Support USER:PASS format
+      const colonIndex = value.indexOf(':');
+      if (colonIndex > 0) {
+        return {
+          type: 'basic',
+          username: value.substring(0, colonIndex),
+          password: value.substring(colonIndex + 1),
+        };
+      }
+      // If no colon, treat as bearer token
+      return { type: 'bearer', bearerToken: value };
+
+    case 'oauth2':
+      // For env var, treat as access token
+      return {
+        type: 'oauth2',
+        oauth2: { accessToken: value },
+      };
+
+    default:
+      return { type: 'bearer', bearerToken: value };
+  }
+}
+
+/**
+ * Get auth from environment variable using adapter config
+ */
+function getAuthFromEnv(apiName: string): AuthProfile | null {
+  const adapter = loadAdapter(apiName);
+
+  // Check adapter-specific env var first (e.g., STRIPE_API_KEY, GITHUB_TOKEN)
+  if (adapter?.auth?.envVar) {
+    const envValue = process.env[adapter.auth.envVar];
+    if (envValue) {
+      return buildAuthProfileFromEnv(adapter.auth, envValue);
+    }
+  }
+
+  // Check for basic auth env vars (envVarUser and envVarPass)
+  if (adapter?.auth?.envVarUser && adapter?.auth?.envVarPass) {
+    const user = process.env[adapter.auth.envVarUser];
+    const pass = process.env[adapter.auth.envVarPass];
+    if (user && pass) {
+      return { type: 'basic', username: user, password: pass };
+    }
+  }
+
+  // Fallback: check generic patterns
+  // CLX_<API>_TOKEN (e.g., CLX_STRIPE_TOKEN)
+  const clxEnvVar = `CLX_${apiName.toUpperCase()}_TOKEN`;
+  const clxValue = process.env[clxEnvVar];
+  if (clxValue) {
+    return buildAuthProfileFromEnv(adapter?.auth, clxValue);
+  }
+
+  // <API>_API_KEY (e.g., STRIPE_API_KEY) - legacy fallback
+  const legacyEnvKey = getEnvApiKey(apiName);
+  if (legacyEnvKey) {
+    return buildAuthProfileFromEnv(adapter?.auth, legacyEnvKey);
+  }
+
+  return null;
+}
+
 // Check if token needs refresh and refresh if needed
 export async function ensureValidToken(apiName: string, profileName?: string): Promise<AuthProfile | null> {
-  // First check for environment variable API key (e.g., STRIPE_API_KEY)
-  const envApiKey = getEnvApiKey(apiName);
-  if (envApiKey) {
-    return {
-      type: 'apiKey',
-      apiKey: envApiKey,
-      apiKeyHeader: 'Authorization', // Default to Authorization header with Bearer
-    };
+  // First check for environment variable authentication
+  const envAuth = getAuthFromEnv(apiName);
+  if (envAuth) {
+    return envAuth;
   }
 
   // Get profile name from config if not specified
@@ -239,7 +336,7 @@ export async function authLogin(apiName: string, spec: OpenAPISpec, profileName:
       console.log(`Key location: ${scheme.in} (${scheme.name})`);
       console.log();
 
-      const apiKey = await prompt('Enter your API key: ', true);
+      const apiKey = await prompt('Enter your API key: ', true, apiName);
 
       config = {
         type: 'apiKey',
@@ -258,7 +355,7 @@ export async function authLogin(apiName: string, spec: OpenAPISpec, profileName:
       console.log('This API uses Bearer token authentication.');
       console.log();
 
-      const token = await prompt('Enter your Bearer token: ', true);
+      const token = await prompt('Enter your Bearer token: ', true, apiName);
 
       config = {
         type: 'bearer',
@@ -271,8 +368,8 @@ export async function authLogin(apiName: string, spec: OpenAPISpec, profileName:
       console.log('This API uses Basic authentication.');
       console.log();
 
-      const username = await prompt('Username: ');
-      const password = await prompt('Password: ', true);
+      const username = await prompt('Username: ', false, apiName);
+      const password = await prompt('Password: ', true, apiName);
 
       config = {
         type: 'basic',
@@ -294,8 +391,8 @@ export async function authLogin(apiName: string, spec: OpenAPISpec, profileName:
 
         if (flowInfo.type === 'clientCredentials') {
           // Client credentials flow - automated
-          const clientId = await prompt('Client ID: ');
-          const clientSecret = await prompt('Client Secret: ', true);
+          const clientId = await prompt('Client ID: ', false, apiName);
+          const clientSecret = await prompt('Client Secret: ', true, apiName);
 
           console.log('Fetching access token...');
 
@@ -360,11 +457,11 @@ export async function authLogin(apiName: string, spec: OpenAPISpec, profileName:
           console.log('Please complete the OAuth flow in your browser and paste the tokens here.');
           console.log();
 
-          const clientId = await prompt('Client ID (optional): ');
-          const clientSecret = await prompt('Client Secret (optional): ', true);
-          const accessToken = await prompt('Access token: ', true);
-          const refreshToken = await prompt('Refresh token (optional): ', true);
-          const expiresInStr = await prompt('Expires in seconds (optional): ');
+          const clientId = await prompt('Client ID (optional): ', false, apiName);
+          const clientSecret = await prompt('Client Secret (optional): ', true, apiName);
+          const accessToken = await prompt('Access token: ', true, apiName);
+          const refreshToken = await prompt('Refresh token (optional): ', true, apiName);
+          const expiresInStr = await prompt('Expires in seconds (optional): ', false, apiName);
 
           config = {
             type: 'oauth2',
@@ -387,8 +484,8 @@ export async function authLogin(apiName: string, spec: OpenAPISpec, profileName:
         console.log('Please provide an access token directly.');
         console.log();
 
-        const accessToken = await prompt('Access token: ', true);
-        const refreshToken = await prompt('Refresh token (optional): ', true);
+        const accessToken = await prompt('Access token: ', true, apiName);
+        const refreshToken = await prompt('Refresh token (optional): ', true, apiName);
 
         config = {
           type: 'oauth2',

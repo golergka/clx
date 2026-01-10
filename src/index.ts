@@ -151,7 +151,7 @@ function navigateTree(
 
 // Handle auth subcommands
 async function handleAuthCommand(apiName: string, spec: OpenAPISpec, args: string[]): Promise<void> {
-  const { flags, positional } = parseArgs(args);
+  const { flags, positional } = parseArgs(args);  // customHeaders not needed for auth
   const subcommand = positional[0];
   const profileName = flags.get('profile');
 
@@ -303,7 +303,7 @@ async function runApiCli(apiName: string, args: string[], globalOpts: GlobalOpti
   const tree = buildCommandTree(spec);
 
   // Parse arguments
-  const { flags, positional } = parseArgs(args);
+  const { flags, positional, customHeaders } = parseArgs(args);
 
   // Check for help flag at any level
   const showHelp = flags.has('help') || flags.has('h');
@@ -312,12 +312,15 @@ async function runApiCli(apiName: string, args: string[], globalOpts: GlobalOpti
   const { node, path, remaining } = navigateTree(tree, positional);
 
   // Parse remaining arguments
-  const { flags: opFlags } = parseArgs(remaining);
+  const { flags: opFlags, customHeaders: opCustomHeaders } = parseArgs(remaining);
 
   // Merge flags
   for (const [k, v] of opFlags) {
     flags.set(k, v);
   }
+
+  // Merge custom headers
+  const allCustomHeaders = [...customHeaders, ...opCustomHeaders];
 
   // Determine what to show/execute
   const lastPathItem = path[path.length - 1];
@@ -394,7 +397,7 @@ async function runApiCli(apiName: string, args: string[], globalOpts: GlobalOpti
 
   try {
     // Build request
-    const request = buildRequest(ctx, operation, flags, stdinData);
+    const request = buildRequest(ctx, operation, flags, stdinData, allCustomHeaders);
 
     // Dry run mode
     if (ctx.dryRun) {
