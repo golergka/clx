@@ -1,19 +1,43 @@
 // Adapter loader - resolves and loads API adapters
-// Supports both bundled adapters (src/specs/) and user-installed specs (~/.config/clx/specs/)
+// Adapters are bundled in src/specs/, specs are downloaded at install time
 
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import YAML from 'yaml';
 import type { OpenAPISpec } from './types.js';
-import type { AdapterConfig, ResolvedAdapter } from './adapter.js';
-import { resolveAdapterConfig, ADAPTER_DEFAULTS } from './adapter.js';
-import { getSpecsDir, loadSpec as loadUserSpec } from './config.js';
+import type { AdapterConfig, ResolvedAdapter } from './core/index.js';
+import { resolveAdapterConfig } from './core/index.js';
 
 // Import bundled adapters
 import * as bundledAdapters from './specs/index.js';
 
 // Cache for loaded adapters
 const adapterCache = new Map<string, ResolvedAdapter>();
+
+// GitHub raw URL for downloading specs
+const SPEC_BASE_URL = 'https://raw.githubusercontent.com/golergka/clx/main/registry';
+
+/**
+ * Get user's clx directory (defaults to ~/.clx)
+ */
+export function getClxDir(): string {
+  return process.env.CLX_HOME || path.join(os.homedir(), '.clx');
+}
+
+/**
+ * Get user's specs directory
+ */
+export function getUserSpecsDir(): string {
+  return path.join(getClxDir(), 'specs');
+}
+
+/**
+ * Get user's bin directory
+ */
+export function getUserBinDir(): string {
+  return process.env.CLX_BIN || path.join(getClxDir(), 'bin');
+}
 
 /**
  * Get list of all bundled adapter names
@@ -38,105 +62,81 @@ export function hasBundledAdapter(name: string): boolean {
 }
 
 /**
- * Load OpenAPI spec from bundled adapter's directory
+ * Load OpenAPI spec from user's specs directory
  */
-function loadBundledSpec(adapterConfig: AdapterConfig): OpenAPISpec | null {
-  // The spec path is relative to the adapter file
-  // Since adapters are at src/specs/{name}/adapter.ts
-  // and specs are at src/specs/{name}/openapi.yaml
-  // We need to resolve this at runtime
+function loadUserSpec(name: string): OpenAPISpec | null {
+  const specsDir = getUserSpecsDir();
+  const specPath = path.join(specsDir, `${name}.yaml`);
 
-  // For bundled specs, we look in the dist or src directory
-  const possiblePaths = [
-    // Development: relative to project root
-    path.join(process.cwd(), 'src', 'specs', adapterConfig.name, 'openapi.yaml'),
-    // Built: check if spec was copied
-    path.join(__dirname, 'specs', adapterConfig.name, 'openapi.yaml'),
-  ];
-
-  for (const specPath of possiblePaths) {
-    if (fs.existsSync(specPath)) {
-      try {
-        const content = fs.readFileSync(specPath, 'utf-8');
-        return YAML.parse(content) as OpenAPISpec;
-      } catch {
-        continue;
-      }
-    }
+  if (!fs.existsSync(specPath)) {
+    return null;
   }
 
-  return null;
+  try {
+    const content = fs.readFileSync(specPath, 'utf-8');
+    return YAML.parse(content) as OpenAPISpec;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Create a synthetic adapter config for user-installed specs
- * (specs that don't have a bundled adapter)
+ * Download and save spec from clx repo
  */
-function createSyntheticAdapter(name: string, spec: OpenAPISpec): AdapterConfig {
-  return {
-    name,
-    spec: `./${name}.yaml`,
-    displayName: spec.info.title,
-    version: spec.info.version,
-    // Auto-detect auth from spec's securitySchemes
-    auth: inferAuthFromSpec(spec),
-    help: {
-      summary: spec.info.description?.slice(0, 100) || spec.info.title,
-    },
-  };
+export async function downloadSpec(name: string): Promise<boolean> {
+  const url = `${SPEC_BASE_URL}/${name}/openapi.yaml`;
+
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const content = await response.text();
+
+    // Ensure specs directory exists
+    const specsDir = getUserSpecsDir();
+    if (!fs.existsSync(specsDir)) {
+      fs.mkdirSync(specsDir, { recursive: true });
+    }
+
+    // Save spec
+    const specPath = path.join(specsDir, `${name}.yaml`);
+    fs.writeFileSync(specPath, content);
+
+    return true;
+  } catch (err) {
+    console.error(`Failed to download spec: ${err instanceof Error ? err.message : err}`);
+    return false;
+  }
 }
 
 /**
- * Infer auth configuration from OpenAPI spec's securitySchemes
+ * Check if spec is installed (downloaded) for an API
  */
-function inferAuthFromSpec(spec: OpenAPISpec): AdapterConfig['auth'] | undefined {
-  const schemes = spec.components?.securitySchemes;
-  if (!schemes) return undefined;
+export function isSpecInstalled(name: string): boolean {
+  const specsDir = getUserSpecsDir();
+  const specPath = path.join(specsDir, `${name}.yaml`);
+  return fs.existsSync(specPath);
+}
 
-  // Find the first usable security scheme
-  for (const [name, scheme] of Object.entries(schemes)) {
-    if (scheme.type === 'http' && scheme.scheme === 'bearer') {
-      return {
-        type: 'bearer',
-        login: {
-          prompt: `Enter your ${spec.info.title} API token:`,
-        },
-      };
-    }
+/**
+ * Remove installed spec
+ */
+export function removeSpec(name: string): boolean {
+  const specsDir = getUserSpecsDir();
+  const specPath = path.join(specsDir, `${name}.yaml`);
 
-    if (scheme.type === 'apiKey') {
-      return {
-        type: 'apiKey',
-        header: scheme.in === 'header' ? scheme.name : undefined,
-        query: scheme.in === 'query' ? scheme.name : undefined,
-        login: {
-          prompt: `Enter your ${spec.info.title} API key:`,
-        },
-      };
-    }
-
-    if (scheme.type === 'oauth2') {
-      const flows = scheme.flows;
-      const flow = flows?.authorizationCode || flows?.clientCredentials || flows?.implicit;
-      if (flow) {
-        return {
-          type: 'oauth2',
-          oauth: {
-            authorizationUrl: flow.authorizationUrl || '',
-            tokenUrl: flow.tokenUrl || '',
-            scopes: Object.keys(flow.scopes || {}),
-          },
-        };
-      }
-    }
+  if (fs.existsSync(specPath)) {
+    fs.unlinkSync(specPath);
+    return true;
   }
-
-  return undefined;
+  return false;
 }
 
 /**
  * Load and resolve an adapter by name.
- * Checks bundled adapters first, then falls back to user-installed specs.
+ * Requires a bundled adapter config and a downloaded spec.
  */
 export function loadAdapter(name: string): ResolvedAdapter | null {
   // Check cache first
@@ -144,47 +144,24 @@ export function loadAdapter(name: string): ResolvedAdapter | null {
     return adapterCache.get(name)!;
   }
 
-  let adapterConfig: AdapterConfig;
-  let spec: OpenAPISpec | null = null;
-  let specPath: string;
-
-  // Try bundled adapter first
-  const bundled = getBundledAdapter(name);
-  if (bundled) {
-    adapterConfig = bundled;
-    spec = loadBundledSpec(bundled);
-
-    if (!spec) {
-      // Bundled adapter exists but spec not found - might need to run update-spec
-      // Fall through to try user-installed
-    } else {
-      specPath = path.join('src', 'specs', name, 'openapi.yaml');
-    }
+  // Must have a bundled adapter
+  const adapterConfig = getBundledAdapter(name);
+  if (!adapterConfig) {
+    return null;
   }
 
-  // If no bundled spec, try user-installed
+  // Load spec from user's specs directory
+  const spec = loadUserSpec(name);
   if (!spec) {
-    spec = loadUserSpec(name);
-    if (!spec) {
-      return null;
-    }
-    specPath = path.join(getSpecsDir(), `${name}.yaml`);
-
-    // Use bundled adapter config if exists, otherwise create synthetic
-    if (bundled) {
-      adapterConfig = bundled;
-    } else {
-      adapterConfig = createSyntheticAdapter(name, spec);
-    }
+    return null;
   }
 
   // Resolve config with defaults
-  const resolvedConfig = resolveAdapterConfig(adapterConfig!);
+  const resolvedConfig = resolveAdapterConfig(adapterConfig);
 
   const resolved: ResolvedAdapter = {
     ...resolvedConfig,
     specData: spec,
-    specPath: specPath!,
   };
 
   // Cache it
@@ -222,21 +199,16 @@ export function clearAdapterCache(): void {
 }
 
 /**
- * List all available APIs (bundled + user-installed)
+ * List all installed APIs (have both adapter and downloaded spec)
  */
-export function listAllAdapters(): string[] {
+export function listInstalledApis(): string[] {
   const bundled = getBundledAdapterNames();
+  return bundled.filter(name => isSpecInstalled(name));
+}
 
-  // Get user-installed specs that aren't bundled
-  const specsDir = getSpecsDir();
-  let userInstalled: string[] = [];
-
-  if (fs.existsSync(specsDir)) {
-    userInstalled = fs.readdirSync(specsDir)
-      .filter(f => f.endsWith('.yaml') || f.endsWith('.json'))
-      .map(f => f.replace(/\.(yaml|json)$/, ''))
-      .filter(name => !bundled.includes(name));
-  }
-
-  return [...bundled, ...userInstalled].sort();
+/**
+ * List all available APIs (bundled adapters, whether installed or not)
+ */
+export function listAvailableApis(): string[] {
+  return getBundledAdapterNames();
 }

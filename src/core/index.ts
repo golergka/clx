@@ -1,7 +1,7 @@
-// Adapter system for API-specific configuration
+// Core module - adapter definition and types
 // See docs/SPECS.md for full documentation
 
-import type { OpenAPISpec, AuthProfile } from './types.js';
+import type { OpenAPISpec, AuthProfile } from '../types.js';
 
 // Context passed to dynamic adapter functions
 export interface AdapterContext {
@@ -12,6 +12,7 @@ export interface AdapterContext {
   offset?: number;
   limit?: number;
   page?: number;
+  resource?: string;
 }
 
 // Request object for transformation
@@ -93,6 +94,7 @@ export interface ParametersConfig {
 // Request transformation
 export interface RequestConfig {
   headers?: Record<string, string> | ((ctx: AdapterContext) => Record<string, string>);
+  contentType?: string;
   transformBody?: (body: unknown, ctx: AdapterContext) => unknown;
   transform?: (req: AdapterRequest, ctx: AdapterContext) => AdapterRequest;
 }
@@ -141,6 +143,8 @@ export interface CustomPaginationConfig {
 
 export interface PaginationConfig {
   style: 'cursor' | 'offset' | 'page' | 'link' | 'custom';
+  param?: string;
+  hasMore?: (res: unknown) => boolean;
   cursor?: CursorPaginationConfig;
   offset?: OffsetPaginationConfig;
   page?: PagePaginationConfig;
@@ -224,11 +228,9 @@ export interface HelpConfig {
 export interface AdapterConfig {
   // Required
   name: string;
-  spec: string;
 
   // Optional basic info
   displayName?: string;
-  version?: string;
 
   // Base URL (static or dynamic)
   baseUrl?: string | ((ctx: AdapterContext) => string);
@@ -252,7 +254,6 @@ export interface AdapterConfig {
 // Resolved adapter with loaded spec
 export interface ResolvedAdapter extends AdapterConfig {
   specData: OpenAPISpec;
-  specPath: string;
 }
 
 // Framework defaults
@@ -405,7 +406,6 @@ export function autoTransformOperationId(operationId: string): string {
   if (verbNounMatch) {
     const [, verb, noun] = verbNounMatch;
     const action = verb.toLowerCase().replace('retrieve', 'get').replace('remove', 'delete').replace('add', 'create');
-    // Pluralize for list, singular for others
     const resource = noun.toLowerCase();
     return `${resource} ${action}`;
   }

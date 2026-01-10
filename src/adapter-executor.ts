@@ -8,8 +8,8 @@ import type {
   AdapterRequest,
   AdapterResponse,
   AdapterAuthConfig,
-} from './adapter.js';
-import { applyAuth as applyAdapterAuth, extractError, flattenToFormData } from './adapter.js';
+} from './core/index.js';
+import { applyAuth as applyAdapterAuth, extractError, flattenToFormData } from './core/index.js';
 import { executeRequest as baseExecuteRequest } from './executor.js';
 import { NetworkError, ApiError } from './errors.js';
 

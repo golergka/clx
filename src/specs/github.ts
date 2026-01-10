@@ -1,10 +1,9 @@
 // GitHub API adapter
-import { defineAdapter } from '../../adapter.js';
+import { defineAdapter } from '../core/index.js';
 
 export default defineAdapter({
   name: 'github',
   displayName: 'GitHub',
-  spec: './openapi.yaml',
 
   baseUrl: 'https://api.github.com',
 
@@ -42,7 +41,6 @@ export default defineAdapter({
   commands: {
     mode: 'transform',
     transform: (operationId: string) => {
-      // GitHub uses 'repos/list' style operationIds
       return operationId.replace(/\//g, ' ').replace(/-/g, ' ');
     },
   },
@@ -54,9 +52,5 @@ export default defineAdapter({
   help: {
     summary: 'GitHub REST API',
     docs: 'https://docs.github.com/en/rest',
-    examples: [
-      { cmd: 'github repos list', desc: 'List your repositories' },
-      { cmd: 'github users get --username octocat', desc: 'Get user info' },
-    ],
   },
 });

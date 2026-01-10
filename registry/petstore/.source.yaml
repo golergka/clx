@@ -1,0 +1,6 @@
+name: petstore
+source:
+  url: https://petstore3.swagger.io/api/v3/openapi.yaml
+retrieved: 2026-01-10T02:40:14.932Z
+sha256: b62c1cec1f087aa2597d56ab492311a125827b14482f8d1cb275701d4bfd018a
+size: 22091

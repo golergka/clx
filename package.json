@@ -28,7 +28,9 @@
     "compile": "bun build src/index.ts --compile --outfile dist/clx",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "prepublishOnly": "bun run compile"
+    "prepublishOnly": "bun run compile",
+    "update-spec": "bun scripts/update-spec.ts",
+    "update-specs": "bun scripts/update-spec.ts --all"
   },
   "keywords": [
     "cli",

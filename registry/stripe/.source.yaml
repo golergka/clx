@@ -1,6 +1,5 @@
 name: stripe
 source:
-  type: url
   url: https://raw.githubusercontent.com/stripe/openapi/master/openapi/spec3.yaml
 retrieved: null
 sha256: null

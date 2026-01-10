@@ -1,10 +1,9 @@
 // Stripe API adapter
-import { defineAdapter, flattenToFormData, type AdapterContext } from '../../adapter.js';
+import { defineAdapter, flattenToFormData, type AdapterContext } from '../core/index.js';
 
 export default defineAdapter({
   name: 'stripe',
   displayName: 'Stripe',
-  spec: './openapi.yaml',
 
   baseUrl: 'https://api.stripe.com',
 
@@ -23,16 +22,11 @@ export default defineAdapter({
     headers: (ctx: AdapterContext) => ({
       'Stripe-Version': '2024-01-15',
     }),
-    // Stripe uses form encoding, not JSON
     transformBody: (body: unknown) => flattenToFormData(body as Record<string, unknown>),
   },
 
   content: {
     requestType: 'application/x-www-form-urlencoded',
-  },
-
-  response: {
-    unwrap: (res: unknown) => res, // Stripe responses are already clean
   },
 
   pagination: {
@@ -82,10 +76,8 @@ export default defineAdapter({
   help: {
     summary: 'Stripe payment processing API',
     docs: 'https://stripe.com/docs/api',
-    dashboard: 'https://dashboard.stripe.com',
     examples: [
       { cmd: 'stripe customers list', desc: 'List customers' },
-      { cmd: 'stripe customers create --email user@example.com', desc: 'Create a customer' },
       { cmd: 'stripe charges create --amount 2000 --currency usd --source tok_visa', desc: 'Create a charge' },
     ],
   },

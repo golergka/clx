@@ -1,7 +1,0 @@
-name: petstore
-source:
-  type: url
-  url: https://petstore3.swagger.io/api/v3/openapi.yaml
-retrieved: null
-sha256: null
-size: null

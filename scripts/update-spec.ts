@@ -1,24 +1,22 @@
 #!/usr/bin/env bun
 // Script to update OpenAPI specs from their sources
-// Usage: bun scripts/update-spec.ts <api-name>
-//        bun scripts/update-spec.ts --all
-//        bun scripts/update-spec.ts --check
+// Specs are stored in registry/{api}/openapi.yaml (not bundled in build)
+//
+// Usage: bun run update-spec <api-name>
+//        bun run update-spec --all
+//        bun run update-spec --check
 
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import YAML from 'yaml';
 
-const SPECS_DIR = path.join(import.meta.dir, '..', 'src', 'specs');
+const REGISTRY_DIR = path.join(import.meta.dir, '..', 'registry');
 
 interface SourceManifest {
   name: string;
   source: {
-    type: 'url' | 'github';
-    url?: string;
-    repo?: string;
-    path?: string;
-    ref?: string;
+    url: string;
   };
   retrieved: string | null;
   sha256: string | null;
@@ -44,16 +42,7 @@ function computeHash(content: string): string {
 }
 
 async function fetchSpec(manifest: SourceManifest): Promise<string> {
-  let url: string;
-
-  if (manifest.source.type === 'url') {
-    url = manifest.source.url!;
-  } else if (manifest.source.type === 'github') {
-    const { repo, path: filePath, ref } = manifest.source;
-    url = `https://raw.githubusercontent.com/${repo}/${ref || 'main'}/${filePath}`;
-  } else {
-    throw new Error(`Unknown source type: ${manifest.source.type}`);
-  }
+  const url = manifest.source.url;
 
   console.log(`  Fetching ${url}...`);
   const response = await fetch(url);
@@ -66,10 +55,10 @@ async function fetchSpec(manifest: SourceManifest): Promise<string> {
 }
 
 async function updateSpec(name: string, checkOnly: boolean = false): Promise<boolean> {
-  const specDir = path.join(SPECS_DIR, name);
+  const specDir = path.join(REGISTRY_DIR, name);
 
   if (!fs.existsSync(specDir)) {
-    console.error(`  Error: Spec directory not found: ${specDir}`);
+    console.error(`  Error: Registry directory not found: ${specDir}`);
     return false;
   }
 
@@ -114,11 +103,11 @@ async function updateSpec(name: string, checkOnly: boolean = false): Promise<boo
 }
 
 function listSpecs(): string[] {
-  if (!fs.existsSync(SPECS_DIR)) {
+  if (!fs.existsSync(REGISTRY_DIR)) {
     return [];
   }
 
-  return fs.readdirSync(SPECS_DIR, { withFileTypes: true })
+  return fs.readdirSync(REGISTRY_DIR, { withFileTypes: true })
     .filter(d => d.isDirectory() && !d.name.startsWith('.'))
     .map(d => d.name);
 }
@@ -127,11 +116,11 @@ async function main() {
   const args = process.argv.slice(2);
 
   if (args.length === 0) {
-    console.log(`Usage: bun scripts/update-spec.ts <api-name>
-       bun scripts/update-spec.ts --all
-       bun scripts/update-spec.ts --check
+    console.log(`Usage: bun run update-spec <api-name>
+       bun run update-spec --all
+       bun run update-spec --check
 
-Available specs: ${listSpecs().join(', ')}`);
+Available specs: ${listSpecs().join(', ') || '(none)'}`);
     process.exit(1);
   }
 
@@ -141,7 +130,7 @@ Available specs: ${listSpecs().join(', ')}`);
   if (updateAll || checkOnly) {
     const specs = listSpecs();
     if (specs.length === 0) {
-      console.log('No specs found.');
+      console.log('No specs found in registry/');
       process.exit(0);
     }
 
