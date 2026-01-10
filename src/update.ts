@@ -4,7 +4,9 @@ import * as path from 'path';
 import { getConfigDir, shouldCheckUpdates } from './config.js';
 import { box, yellow, cyan, dim } from './ui.js';
 
-const VERSION = '0.1.2';
+// Read version from package.json
+import packageJson from '../package.json';
+const VERSION = packageJson.version;
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const UPDATE_CHECK_URL = 'https://registry.npmjs.org/clx-cli/latest';
 
