@@ -2,60 +2,110 @@
 
 ## Overview
 
-Every API in clx consists of two files:
+Every API in clx consists of two parts:
 
+**In the repo, bundled in build:**
 ```
 src/specs/
+  stripe.ts      # Adapter — small, mostly defaults
+  github.ts
+  index.ts       # Registry — must modify to add API
+```
+
+**In the repo, NOT bundled (downloaded at install time):**
+```
+registry/
   stripe/
-    openapi.yaml    # Original OpenAPI spec, unmodified from source
-    adapter.ts      # clx-specific configuration and adaptations
+    openapi.yaml   # Original spec, verbatim from source
+    .source.yaml   # Provenance metadata
   github/
     openapi.yaml
-    adapter.ts
+    .source.yaml
+```
+
+**On user's machine after install:**
+```
+~/.clx/
+  specs/
+    stripe.yaml    # Downloaded from clx repo
+    github.yaml
 ```
 
 The framework has zero hardcoded API-specific logic. All behavior comes from adapters.
 
+## How It Works
+
+1. User runs `clx install stripe`
+2. clx looks up `stripe` in bundled adapters (`src/specs/stripe.ts`)
+3. Downloads spec from `https://raw.githubusercontent.com/clx-dev/clx/main/registry/stripe/openapi.yaml`
+4. Saves to `~/.clx/specs/stripe.yaml`
+5. Creates symlink `~/.clx/bin/stripe -> clx`
+
+**Adding a new API requires:**
+- Adding `src/specs/newapi.ts` (adapter)
+- Adding export to `src/specs/index.ts` (registry)
+- Adding `registry/newapi/openapi.yaml` (spec, not bundled)
+
+The first two are code changes → AGPL applies.
+
 ---
 
-## File Structure
+## Adapter Files
 
-### `openapi.yaml`
-
-The original OpenAPI specification, downloaded verbatim from the API provider. Never modified.
-
-**Source tracking in git:**
-
-```yaml
-# .source.yaml (alongside openapi.yaml)
-url: https://raw.githubusercontent.com/stripe/openapi/master/openapi/spec3.yaml
-retrieved: 2025-01-15T10:30:00Z
-sha256: a1b2c3d4...
-```
-
-**Update process:**
-
-```bash
-# Script to refresh specs from sources
-./scripts/update-specs.ts stripe
-./scripts/update-specs.ts --all
-```
-
-### `adapter.ts`
-
-All clx-specific configuration. This is where the magic happens.
+Adapters are small TypeScript files. Most APIs need minimal configuration — the framework handles everything from the OpenAPI spec.
 
 ```typescript
-import { defineAdapter } from '@clx/core';
+// src/specs/stripe.ts
+import { defineAdapter } from '../core';
 
 export default defineAdapter({
-  // Required
   name: 'stripe',
-  spec: './openapi.yaml',
-  
-  // Everything else optional, framework provides sensible defaults
-  ...
+  auth: {
+    type: 'bearer',
+    envVar: 'STRIPE_API_KEY',
+  },
 });
+```
+
+That's it for most APIs. The framework infers everything else from the downloaded spec.
+
+### Overrides
+
+For APIs with quirks, add only what's needed:
+
+```typescript
+// src/specs/stripe.ts
+import { defineAdapter } from '../core';
+
+export default defineAdapter({
+  name: 'stripe',
+  auth: {
+    type: 'bearer',
+    envVar: 'STRIPE_API_KEY',
+  },
+  // Stripe uses form encoding, not JSON
+  request: {
+    contentType: 'application/x-www-form-urlencoded',
+  },
+  // Stripe pagination is cursor-based
+  pagination: {
+    style: 'cursor',
+    param: 'starting_after',
+    hasMore: (res) => res.has_more,
+  },
+});
+```
+
+### Registry Index
+
+```typescript
+// src/specs/index.ts
+// This file must be modified to add new APIs
+
+export { default as stripe } from './stripe';
+export { default as github } from './github';
+export { default as openai } from './openai';
+// ...
 ```
 
 ---
@@ -67,16 +117,11 @@ export default defineAdapter({
 ```typescript
 defineAdapter({
   // Identifier used in CLI (clx install stripe, stripe customers list)
+  // Also determines spec download path: registry/{name}/openapi.yaml
   name: 'stripe',
   
-  // Path to OpenAPI spec relative to adapter file
-  spec: './openapi.yaml',
-  
-  // Display name for help/docs
+  // Display name for help/docs (optional, defaults to capitalized name)
   displayName: 'Stripe',
-  
-  // Optional version override (defaults to spec's info.version)
-  version: '2024-01-15',
 });
 ```
 
@@ -576,13 +621,12 @@ defineAdapter({
 ## Complete Example: Stripe
 
 ```typescript
-// src/specs/stripe/adapter.ts
-import { defineAdapter } from '@clx/core';
+// src/specs/stripe.ts
+import { defineAdapter } from '../core';
 
 export default defineAdapter({
   name: 'stripe',
   displayName: 'Stripe',
-  spec: './openapi.yaml',
   
   baseUrl: 'https://api.stripe.com',
   
@@ -667,13 +711,12 @@ export default defineAdapter({
 ## Complete Example: GitHub
 
 ```typescript
-// src/specs/github/adapter.ts
-import { defineAdapter } from '@clx/core';
+// src/specs/github.ts
+import { defineAdapter } from '../core';
 
 export default defineAdapter({
   name: 'github',
   displayName: 'GitHub',
-  spec: './openapi.yaml',
   
   baseUrl: 'https://api.github.com',
   
@@ -734,12 +777,11 @@ export default defineAdapter({
 Most adapters can be tiny if the API is well-behaved:
 
 ```typescript
-// src/specs/petstore/adapter.ts
-import { defineAdapter } from '@clx/core';
+// src/specs/petstore.ts
+import { defineAdapter } from '../core';
 
 export default defineAdapter({
   name: 'petstore',
-  spec: './openapi.yaml',
   auth: {
     type: 'apiKey',
     header: 'api_key',
@@ -752,39 +794,19 @@ Framework defaults handle everything else.
 
 ---
 
-## Registry Index
-
-```typescript
-// src/specs/index.ts
-// This file must be modified to add new APIs
-
-export { default as stripe } from './stripe/adapter';
-export { default as github } from './github/adapter';
-export { default as openai } from './openai/adapter';
-export { default as anthropic } from './anthropic/adapter';
-export { default as petstore } from './petstore/adapter';
-// ...
-```
-
----
-
 ## Spec Source Management
+
+OpenAPI specs live in `registry/` folder (not bundled in build).
 
 ### `.source.yaml`
 
-Every spec directory has a source manifest:
+Every spec has a source manifest:
 
 ```yaml
-# src/specs/stripe/.source.yaml
+# registry/stripe/.source.yaml
 name: stripe
 source:
-  type: url
   url: https://raw.githubusercontent.com/stripe/openapi/master/openapi/spec3.yaml
-  # Or GitHub release
-  # type: github
-  # repo: stripe/openapi
-  # path: openapi/spec3.yaml
-  # ref: master
 retrieved: 2025-01-15T10:30:00Z
 sha256: a1b2c3d4e5f6...
 size: 3145728
@@ -818,8 +840,8 @@ async function updateSpec(name: string) {
     return;
   }
   
-  writeFile(`src/specs/${name}/openapi.yaml`, content);
-  writeFile(`src/specs/${name}/.source.yaml`, {
+  writeFile(`registry/${name}/openapi.yaml`, content);
+  writeFile(`registry/${name}/.source.yaml`, {
     ...manifest,
     retrieved: new Date().toISOString(),
     sha256: hash,
@@ -891,13 +913,11 @@ const DEFAULTS = {
 Full TypeScript types for adapter config:
 
 ```typescript
-// @clx/core/types.ts
+// src/core/types.ts
 
 export interface AdapterConfig {
   name: string;
-  spec: string;
   displayName?: string;
-  version?: string;
   
   baseUrl?: string | ((ctx: Context) => string);
   
