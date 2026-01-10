@@ -1,18 +1,48 @@
 {
   "name": "clx",
   "version": "0.1.0",
-  "description": "CLI API Client Generator - Interpret OpenAPI specs at runtime",
+  "description": "CLI API client generator from OpenAPI specs",
   "type": "module",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/golergka/clx.git"
+  },
+  "author": "golergka",
+  "homepage": "https://github.com/golergka/clx",
+  "bugs": {
+    "url": "https://github.com/golergka/clx/issues"
+  },
   "main": "dist/index.js",
   "bin": {
-    "clx": "dist/index.js"
+    "clx": "./dist/clx"
   },
+  "files": [
+    "dist/",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target node",
     "dev": "bun run src/index.ts",
-    "compile": "bun build src/index.ts --compile --outfile clx",
+    "compile": "bun build src/index.ts --compile --outfile dist/clx",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "prepublishOnly": "bun run compile"
+  },
+  "keywords": [
+    "cli",
+    "openapi",
+    "swagger",
+    "api",
+    "rest",
+    "codegen",
+    "api-client",
+    "curl",
+    "http"
+  ],
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "yaml": "^2.8.2"
