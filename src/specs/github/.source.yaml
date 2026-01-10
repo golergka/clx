@@ -1,0 +1,9 @@
+name: github
+source:
+  type: github
+  repo: github/rest-api-description
+  path: descriptions/api.github.com/api.github.com.yaml
+  ref: main
+retrieved: null
+sha256: null
+size: null
