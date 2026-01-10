@@ -10,14 +10,13 @@ import { parseArgs, buildRequest, executeRequest, generateCurl } from './executo
 import { authLogin, authStatus, authLogout, authList, authSwitch, ensureValidToken } from './auth.js';
 import { getRegistryEntry, type UpdateOptions } from './registry.js';
 import { formatOutput } from './output.js';
-import { runDiagnostics, printDiagnostics, type DoctorOptions } from './doctor.js';
-import { handleCompletions } from './completions.js';
 import { runSetup, isInPath, type SetupOptions } from './setup.js';
 import { formatError, formatErrorJson, ExitCode, ClxError, UsageError, suggestCommand } from './errors.js';
 import { success, warning, error, info, bold, dim, cyan, confirm, isTTY, box } from './ui.js';
 import { checkForUpdates, getVersion } from './update.js';
 import { loadAdapter, hasBundledAdapter, getAdapterBaseUrl, listAvailableApis, listInstalledApis, downloadSpec, isSpecInstalled, removeSpec as removeSpecFile, getUserBinDir } from './adapter-loader.js';
 import { ensureBinDir, isPathConfigured, createApiSymlink, removeApiSymlink } from './checks.js';
+import { createClxProgram, parseRawArgs, type GlobalOptions } from './cli.js';
 import type { ResolvedAdapter } from './core/index.js';
 
 const VERSION = getVersion();
@@ -112,337 +111,8 @@ async function handleFirstRun(apiName?: string): Promise<boolean> {
   return false;
 }
 
-// Global options
-interface GlobalOptions {
-  json?: boolean;
-  quiet?: boolean;
-  verbose?: boolean;
-  yes?: boolean;
-}
-
-function parseGlobalOptions(args: string[]): { options: GlobalOptions; remaining: string[] } {
-  const options: GlobalOptions = {};
-  const remaining: string[] = [];
-
-  for (const arg of args) {
-    if (arg === '--json') {
-      options.json = true;
-    } else if (arg === '--quiet' || arg === '-q') {
-      options.quiet = true;
-    } else if (arg === '--verbose' || arg === '-v') {
-      options.verbose = true;
-    } else if (arg === '--yes' || arg === '-y') {
-      options.yes = true;
-    } else {
-      remaining.push(arg);
-    }
-  }
-
-  return { options, remaining };
-}
-
-// Handle clx package manager commands
-async function handleClxCommands(args: string[], globalOpts: GlobalOptions): Promise<boolean> {
-  if (args.length === 0) {
-    printClxHelp();
-    return true;
-  }
-
-  const command = args[0];
-  const rest = args.slice(1);
-
-  switch (command) {
-    case '--help':
-    case '-h':
-    case 'help':
-      printClxHelp();
-      return true;
-
-    case '--version':
-    case '-v':
-    case 'version':
-      if (globalOpts.json) {
-        console.log(JSON.stringify({ version: VERSION }));
-      } else {
-        console.log(`clx version ${VERSION}`);
-      }
-      return true;
-
-    case 'install': {
-      if (rest.length === 0) {
-        console.log(error('Missing API name'));
-        console.log(`    Usage: clx install <api>`);
-        console.log('');
-        console.log(`    Available APIs: ${listAvailableApis().join(', ')}`);
-        process.exit(ExitCode.USAGE_ERROR);
-      }
-      const apiName = rest[0];
-
-      // Check if API has a bundled adapter
-      if (!hasBundledAdapter(apiName)) {
-        if (globalOpts.json) {
-          console.log(JSON.stringify({ error: { type: 'not_found', message: `Unknown API: ${apiName}` } }));
-        } else {
-          console.log(error(`Unknown API: ${apiName}`));
-          console.log('');
-          console.log(`    Available APIs: ${listAvailableApis().join(', ')}`);
-        }
-        process.exit(ExitCode.NOT_FOUND);
-      }
-
-      // Check if already installed
-      if (isSpecInstalled(apiName)) {
-        if (globalOpts.json) {
-          console.log(JSON.stringify({ status: 'already_installed', api: apiName }));
-        } else {
-          console.log(info(`${apiName} is already installed`));
-        }
-        return true;
-      }
-
-      // Download spec from clx repo
-      if (!globalOpts.quiet) {
-        console.log(`Installing ${apiName}...`);
-      }
-
-      const ok = await downloadSpec(apiName);
-      if (!ok) {
-        if (globalOpts.json) {
-          console.log(JSON.stringify({ error: { type: 'download_failed', message: `Failed to download spec for ${apiName}` } }));
-        } else {
-          console.log(error(`Failed to download spec for ${apiName}`));
-        }
-        process.exit(ExitCode.NETWORK_ERROR);
-      }
-
-      // Ensure bin directory exists and is writable
-      if (!ensureBinDir()) {
-        if (!globalOpts.quiet) {
-          console.log(warning(`Bin directory not writable`));
-          console.log(dim(`  Run 'clx doctor' to diagnose`));
-        }
-      }
-
-      // Create symlink
-      const symlinkCreated = createApiSymlink(apiName);
-      if (!symlinkCreated && !globalOpts.quiet) {
-        console.log(warning(`Could not create symlink`));
-        console.log(dim(`  Run 'clx doctor --fix' to diagnose`));
-      }
-
-      if (globalOpts.json) {
-        console.log(JSON.stringify({ status: 'installed', api: apiName, symlink: symlinkCreated }));
-      } else {
-        console.log(success(`Installed ${apiName}`));
-
-        // Check if bin dir is in PATH
-        if (!isPathConfigured()) {
-          console.log('');
-          console.log(warning(`~/.clx/bin is not in your PATH`));
-          console.log('');
-          console.log(`  Run 'clx setup' to fix this, or add manually:`);
-          console.log(dim(`    export PATH="$HOME/.clx/bin:$PATH"`));
-        }
-      }
-      return true;
-    }
-
-    case 'remove':
-    case 'uninstall': {
-      if (rest.length === 0) {
-        console.log(error('Missing API name'));
-        console.log(`    Usage: clx remove <api>`);
-        process.exit(ExitCode.USAGE_ERROR);
-      }
-      const apiName = rest[0];
-
-      if (!isSpecInstalled(apiName)) {
-        if (globalOpts.json) {
-          console.log(JSON.stringify({ error: { type: 'not_found', message: `${apiName} is not installed` } }));
-        } else {
-          console.log(error(`${apiName} is not installed`));
-        }
-        process.exit(ExitCode.NOT_FOUND);
-      }
-
-      // Confirm removal
-      if (!globalOpts.yes && isTTY()) {
-        const confirmed = await confirm(`Remove ${apiName}?`);
-        if (!confirmed) {
-          console.log('Cancelled.');
-          return true;
-        }
-      }
-
-      // Remove spec
-      removeSpecFile(apiName);
-
-      // Remove symlink
-      removeApiSymlink(apiName);
-
-      if (globalOpts.json) {
-        console.log(JSON.stringify({ status: 'removed', api: apiName }));
-      } else {
-        console.log(success(`Removed ${apiName}`));
-      }
-      return true;
-    }
-
-    case 'list':
-    case 'ls': {
-      const { flags } = parseArgs(rest);
-      const showAll = flags.has('all') || flags.has('a');
-      const installed = listInstalledApis();
-      const available = listAvailableApis();
-
-      if (globalOpts.json) {
-        if (showAll) {
-          console.log(JSON.stringify({ installed, available }));
-        } else {
-          console.log(JSON.stringify({ installed, availableCount: available.length }));
-        }
-      } else {
-        if (installed.length === 0) {
-          console.log(dim('  No APIs installed.'));
-        } else {
-          console.log('  Installed APIs:');
-          console.log('');
-          for (const name of installed) {
-            const adapter = loadAdapter(name);
-            const summary = adapter?.help?.summary || '';
-            console.log(`  ${bold(name.padEnd(16))}${summary}`);
-          }
-        }
-        console.log('');
-        const notInstalledCount = available.length - installed.length;
-        if (showAll) {
-          const notInstalled = available.filter(a => !installed.includes(a));
-          console.log(`  Available (${notInstalled.length}):`);
-          console.log(`  ${notInstalled.join(', ')}`);
-        } else {
-          console.log(`  ${notInstalledCount} more APIs available. Run 'clx list --all' to see all.`);
-        }
-      }
-      return true;
-    }
-
-    case 'update': {
-      const { flags, positional } = parseArgs(rest);
-      const updateOpts: UpdateOptions = {
-        quiet: globalOpts.quiet,
-        json: globalOpts.json,
-      };
-
-      if (flags.has('all')) {
-        const installed = listInstalledSpecs();
-        if (installed.length === 0) {
-          if (globalOpts.json) {
-            console.log(JSON.stringify({ updated: [] }));
-          } else {
-            console.log(warning('No APIs installed'));
-          }
-          return true;
-        }
-
-        if (!globalOpts.quiet && !globalOpts.json) {
-          console.log(`Updating ${installed.length} API(s)...`);
-        }
-
-        const results: { api: string; success: boolean; error?: string }[] = [];
-        for (const api of installed) {
-          try {
-            await updateApi(api, updateOpts);
-            results.push({ api, success: true });
-          } catch (err) {
-            results.push({ api, success: false, error: err instanceof Error ? err.message : String(err) });
-          }
-        }
-
-        if (globalOpts.json) {
-          console.log(JSON.stringify({ updated: results }));
-        }
-        return true;
-      }
-
-      if (positional.length === 0) {
-        console.log(error('Missing API name'));
-        console.log(`    Usage: clx update <api> or clx update --all`);
-        process.exit(ExitCode.USAGE_ERROR);
-      }
-      await updateApi(positional[0], updateOpts);
-      return true;
-    }
-
-    case 'doctor': {
-      const { flags } = parseArgs(rest);
-      const doctorOpts: DoctorOptions = {
-        json: globalOpts.json,
-        fix: flags.has('fix'),
-      };
-      const results = await runDiagnostics(doctorOpts);
-      printDiagnostics(results, doctorOpts);
-      return true;
-    }
-
-    case 'setup': {
-      const { flags } = parseArgs(rest);
-      const setupOpts: SetupOptions = {
-        shell: flags.get('shell'),
-        yes: globalOpts.yes || flags.has('yes'),
-        check: flags.has('check'),
-        uninstall: flags.has('uninstall'),
-        json: globalOpts.json,
-      };
-      await runSetup(setupOpts);
-      return true;
-    }
-
-    case 'completion':
-    case 'completions': {
-      handleCompletions(rest);
-      return true;
-    }
-
-    default:
-      return false;
-  }
-}
-
-function printClxHelp(): void {
-  const available = listAvailableApis();
-  console.log(`${bold('clx')} - CLI API Client Generator
-
-${bold('Usage:')}
-  clx <command> [options]
-
-${bold('Package Management:')}
-  install <api>       Install API
-  remove <api>        Remove installed API
-  list                List installed/available APIs
-
-${bold('Configuration:')}
-  setup               Configure shell integration
-  doctor              Run diagnostic checks
-  completions <shell> Generate shell completions
-
-${bold('Options:')}
-  --json              JSON output
-  --quiet, -q         Suppress output
-  --yes, -y           Skip confirmations
-  --help              Show help
-  --version           Show version
-
-${bold('Examples:')}
-  clx install stripe
-  stripe customers list
-  stripe customers get cus_123
-
-Run 'clx list' to see ${available.length} available APIs.
-
-${bold('Documentation:')}
-  https://github.com/clx-dev/clx
-`);
-}
+// Note: GlobalOptions is now imported from cli.ts
+// Note: handleClxCommands and printClxHelp replaced by commander-based CLI in cli.ts
 
 // Navigate the command tree based on arguments
 function navigateTree(
@@ -534,18 +204,8 @@ async function main(): Promise<void> {
     console.error('[DEBUG] process.argv:', process.argv);
   }
 
-  const apiName = getApiName();
-  let allArgs = process.argv.slice(2);
-
-  // Bun compiled binaries pass the binary name as an extra argument
-  // e.g., ["bun", "/$bunfs/root/clx", "clx", ...actual args]
-  // We need to skip it if it matches the API name
-  if (allArgs.length > 0 && allArgs[0] === apiName) {
-    allArgs = allArgs.slice(1);
-  }
-
-  // Parse global options
-  const { options: globalOpts, remaining: args } = parseGlobalOptions(allArgs);
+  // Parse raw arguments handling bun's quirks
+  const { apiName, args } = parseRawArgs();
 
   // First-run experience
   if (isFirstRun() && apiName === 'clx') {
@@ -553,44 +213,49 @@ async function main(): Promise<void> {
     if (handled) return;
   }
 
-  // If running as 'clx', handle package manager commands
+  // If running as 'clx', use commander for argument parsing
   if (apiName === 'clx') {
-    const handled = await handleClxCommands(args, globalOpts);
-    if (handled) return;
-
-    // Check if first arg is an installed API (for development)
+    // Check if first arg might be an installed API (for development: `clx stripe ...`)
     if (args.length > 0) {
       const potentialApi = args[0];
-      // Check new adapter system first, then fall back to old spec system
-      const adapter = loadAdapter(potentialApi);
-      const spec = adapter?.specData || loadSpec(potentialApi);
-      if (spec) {
-        process.argv = [process.argv[0], potentialApi, ...args.slice(1)];
-        await runApiCli(potentialApi, args.slice(1), globalOpts);
-        return;
+      // Skip if it looks like a flag or known command
+      if (!potentialApi.startsWith('-')) {
+        const knownCommands = ['install', 'remove', 'uninstall', 'list', 'ls', 'doctor', 'setup', 'completions', 'help', 'version'];
+        if (!knownCommands.includes(potentialApi)) {
+          // Check new adapter system first, then fall back to old spec system
+          const adapter = loadAdapter(potentialApi);
+          const spec = adapter?.specData || loadSpec(potentialApi);
+          if (spec) {
+            // Run as API CLI
+            const globalOpts = parseGlobalOptsFromArgs(args.slice(1));
+            await runApiCli(potentialApi, args.slice(1), globalOpts);
+            return;
+          }
+        }
       }
-
-      // Suggest similar commands
-      const allCommands = ['install', 'remove', 'list', 'doctor', 'setup', 'completions', 'help', 'version'];
-      const installed = listInstalledApis();
-      const suggestion = suggestCommand(potentialApi, [...allCommands, ...installed]);
-
-      console.log(error(`Unknown command: ${potentialApi}`));
-      if (suggestion) {
-        console.log('');
-        console.log(`    Did you mean: ${cyan(suggestion)}`);
-      }
-      console.log('');
-      console.log(`    Run '${cyan('clx --help')}' for available commands.`);
-      process.exit(ExitCode.NOT_FOUND);
     }
 
-    printClxHelp();
+    // Use commander for clx commands
+    const program = createClxProgram();
+    await program.parseAsync(['node', 'clx', ...args]);
     return;
   }
 
   // Running as an API CLI (e.g., 'stripe')
+  const globalOpts = parseGlobalOptsFromArgs(args);
   await runApiCli(apiName, args, globalOpts);
+}
+
+// Simple global options parser for API CLI mode
+function parseGlobalOptsFromArgs(args: string[]): GlobalOptions {
+  const opts: GlobalOptions = {};
+  for (const arg of args) {
+    if (arg === '--json') opts.json = true;
+    else if (arg === '-q' || arg === '--quiet') opts.quiet = true;
+    else if (arg === '-v' || arg === '--verbose') opts.verbose = true;
+    else if (arg === '-y' || arg === '--yes') opts.yes = true;
+  }
+  return opts;
 }
 
 async function runApiCli(apiName: string, args: string[], globalOpts: GlobalOptions): Promise<void> {
