@@ -549,7 +549,9 @@ async function main(): Promise<void> {
     // Check if first arg is an installed API (for development)
     if (args.length > 0) {
       const potentialApi = args[0];
-      const spec = loadSpec(potentialApi);
+      // Check new adapter system first, then fall back to old spec system
+      const adapter = loadAdapter(potentialApi);
+      const spec = adapter?.specData || loadSpec(potentialApi);
       if (spec) {
         process.argv = [process.argv[0], potentialApi, ...args.slice(1)];
         await runApiCli(potentialApi, args.slice(1), globalOpts);
@@ -557,8 +559,8 @@ async function main(): Promise<void> {
       }
 
       // Suggest similar commands
-      const allCommands = ['install', 'remove', 'list', 'update', 'search', 'add', 'doctor', 'setup', 'completions', 'help', 'version'];
-      const installed = listInstalledSpecs();
+      const allCommands = ['install', 'remove', 'list', 'doctor', 'setup', 'completions', 'help', 'version'];
+      const installed = listInstalledApis();
       const suggestion = suggestCommand(potentialApi, [...allCommands, ...installed]);
 
       console.log(error(`Unknown command: ${potentialApi}`));
