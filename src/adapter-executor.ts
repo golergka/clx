@@ -195,8 +195,7 @@ function handleError(
   throw new ApiError(
     errorInfo.message || 'API request failed',
     status,
-    errorInfo.code,
-    exitCode
+    errorInfo.code
   );
 }
 

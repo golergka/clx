@@ -13,7 +13,7 @@ import {
   getApiConfig
 } from './config.js';
 import { loadAdapter } from './adapter-loader.js';
-import type { AdapterAuthConfig } from './core/index.js';
+import type { AdapterAuthConfig, ResolvedAdapter } from './core/index.js';
 
 // Interactive prompt helper
 async function prompt(question: string, hidden = false, apiName?: string): Promise<string> {
@@ -317,8 +317,102 @@ export async function ensureValidToken(apiName: string, profileName?: string): P
   return profile;
 }
 
+/**
+ * Handle login with adapter's custom prompts
+ * Used for APIs like Atlassian that need domain + email + token
+ */
+async function handleCustomLoginPrompts(apiName: string, adapter: ResolvedAdapter): Promise<AuthProfile> {
+  const authConfig = adapter.auth!;
+  const prompts = authConfig.login!.prompts!;
+
+  console.log(`Configuring authentication for ${adapter.displayName || apiName}...`);
+  if (authConfig.login?.hint) {
+    console.log(authConfig.login.hint);
+  }
+  console.log();
+
+  // Collect all prompt responses
+  const responses: Record<string, string> = {};
+  for (const p of prompts) {
+    const name = p.name || 'value';
+    let value: string;
+
+    // Show hint if provided
+    if (p.hint) {
+      console.log(`  ${p.hint}`);
+    }
+
+    // Prompt for value
+    value = await prompt(p.prompt + ' ', p.secret ?? false, apiName);
+
+    // Validate if validator provided
+    if (p.validate && !p.validate(value)) {
+      console.error(p.errorMessage || `Invalid value for ${name}`);
+      process.exit(1);
+    }
+
+    responses[name] = value;
+  }
+
+  // Build AuthProfile based on auth type
+  let profile: AuthProfile;
+
+  switch (authConfig.type) {
+    case 'basic':
+      // For basic auth, look for 'email'/'username' and 'token'/'password' in responses
+      const username = responses.email || responses.username || responses.user || '';
+      const password = responses.token || responses.password || responses.pass || responses.apiToken || '';
+      profile = {
+        type: 'basic',
+        username,
+        password,
+      };
+      break;
+
+    case 'bearer':
+      const token = responses.token || responses.apiKey || responses.key || Object.values(responses)[0] || '';
+      profile = {
+        type: 'bearer',
+        bearerToken: token,
+      };
+      break;
+
+    case 'apiKey':
+      const apiKey = responses.apiKey || responses.key || responses.token || Object.values(responses)[0] || '';
+      profile = {
+        type: 'apiKey',
+        apiKey,
+        apiKeyHeader: authConfig.header,
+        apiKeyQuery: authConfig.query,
+      };
+      break;
+
+    default:
+      // For other types, default to bearer with first value
+      profile = {
+        type: 'bearer',
+        bearerToken: Object.values(responses)[0] || '',
+      };
+  }
+
+  // Store all responses in config for use by baseUrl and other functions
+  profile.config = responses;
+
+  return profile;
+}
+
 // Interactive login flow
 export async function authLogin(apiName: string, spec: OpenAPISpec, profileName: string = 'default'): Promise<void> {
+  // Check if adapter has custom login prompts
+  const adapter = loadAdapter(apiName);
+  if (adapter?.auth?.login?.prompts && adapter.auth.login.prompts.length > 0) {
+    const config = await handleCustomLoginPrompts(apiName, adapter);
+    saveAuthProfile(apiName, config, profileName);
+    console.log();
+    console.log(`Authentication saved for ${apiName} (profile: ${profileName}).`);
+    return;
+  }
+
   const authInfo = detectAuthType(spec);
 
   if (!authInfo) {

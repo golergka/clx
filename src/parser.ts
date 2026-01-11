@@ -36,6 +36,9 @@ function doesOperationReturnArray(operation?: Operation): boolean {
   const successResponse = operation.responses['200'] || operation.responses['201'];
   if (!successResponse) return false;
 
+  // Skip if it's a Reference (has $ref)
+  if ('$ref' in successResponse) return false;
+
   // Get content schema
   const content = successResponse.content;
   if (!content) return false;
@@ -158,7 +161,7 @@ export function buildCommandTree(spec: OpenAPISpec): CommandNode {
 
     // Resolve path-level parameter refs
     const pathParameters: Parameter[] = (pathItem.parameters || []).map(param => {
-      if ('$ref' in param && param.$ref) {
+      if ('$ref' in param && typeof param.$ref === 'string') {
         const resolved = resolveRef<Parameter>(spec, param.$ref);
         return resolved || param as Parameter;
       }
@@ -198,7 +201,7 @@ export function buildCommandTree(spec: OpenAPISpec): CommandNode {
 
       // Resolve operation-level parameter refs and merge with path-level
       const operationParams: Parameter[] = (operation.parameters || []).map(param => {
-        if ('$ref' in param && param.$ref) {
+        if ('$ref' in param && typeof param.$ref === 'string') {
           const resolved = resolveRef<Parameter>(spec, param.$ref);
           return resolved || param as Parameter;
         }

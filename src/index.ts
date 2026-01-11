@@ -8,7 +8,7 @@ import { buildCommandTree, getBaseUrl } from './parser.js';
 import { generateRootHelp, generateResourceHelp, generateOperationHelp } from './help.js';
 import { parseArgs, buildRequest, executeRequest, generateCurl } from './executor.js';
 import { authLogin, authStatus, authLogout, authList, authSwitch, ensureValidToken } from './auth.js';
-import { getRegistryEntry, type UpdateOptions } from './registry.js';
+import { getRegistryEntry, installApi, type UpdateOptions } from './registry.js';
 import { formatOutput } from './output.js';
 import { runSetup, isInPath, type SetupOptions } from './setup.js';
 import { formatError, formatErrorJson, ExitCode, ClxError, UsageError, suggestCommand } from './errors.js';
@@ -403,7 +403,10 @@ async function runApiCli(apiName: string, args: string[], globalOpts: GlobalOpti
   // Get base URL: adapter config > registry override > spec servers
   let baseUrl: string | null = null;
   if (adapter) {
-    baseUrl = getAdapterBaseUrl(adapter, { profile: profileName });
+    baseUrl = getAdapterBaseUrl(adapter, {
+      profile: profileName,
+      config: auth?.config as Record<string, unknown> | undefined,
+    });
   }
   if (!baseUrl) {
     const registryEntry = getRegistryEntry(apiName);

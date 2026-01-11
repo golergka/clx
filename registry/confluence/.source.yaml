@@ -1,0 +1,6 @@
+name: confluence
+source:
+  url: https://developer.atlassian.com/cloud/confluence/swagger.v3.json
+retrieved: 2026-01-11T21:45:00.000Z
+sha256: 640134e3a58b75ab553735bfdc622847585c802d2a3f40f583af2cac89cd14d1
+size: 411956

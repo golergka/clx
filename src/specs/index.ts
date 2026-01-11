@@ -4,3 +4,5 @@
 export { default as petstore } from './petstore.js';
 export { default as stripe } from './stripe.js';
 export { default as github } from './github.js';
+export { default as jira } from './jira.js';
+export { default as confluence } from './confluence.js';

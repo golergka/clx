@@ -143,6 +143,8 @@ export interface AuthProfile {
     clientSecret?: string;
     scopes?: string[];
   };
+  // Custom config from adapter login prompts (e.g., domain for Atlassian)
+  config?: Record<string, unknown>;
 }
 
 // Auth configuration stored in ~/.config/clx/auth/<api>.json

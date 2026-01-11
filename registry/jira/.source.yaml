@@ -1,0 +1,6 @@
+name: jira
+source:
+  url: https://developer.atlassian.com/cloud/jira/platform/swagger.v3.json
+retrieved: 2026-01-11T21:45:00.000Z
+sha256: a62f9475353579555ca552c5a046297a7f5fb0f462276693bd295eacc44a78ba
+size: 2386168

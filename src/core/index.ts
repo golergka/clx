@@ -73,7 +73,7 @@ export interface AdapterAuthConfig {
 
 // Command mapping configuration
 export interface CommandsConfig {
-  mode: 'auto' | 'manual' | 'transform';
+  mode?: 'auto' | 'manual' | 'transform';
   map?: Record<string, string>;
   transform?: (operationId: string) => string;
 }
@@ -233,7 +233,7 @@ export interface AdapterConfig {
   displayName?: string;
 
   // Base URL (static or dynamic)
-  baseUrl?: string | ((ctx: AdapterContext) => string);
+  baseUrl?: string | ((ctx: AdapterContext) => string | null);
 
   // All other configuration
   auth?: AdapterAuthConfig;

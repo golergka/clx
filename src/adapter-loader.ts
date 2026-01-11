@@ -183,7 +183,7 @@ function isValidAbsoluteUrl(url: string): boolean {
 /**
  * Get the base URL for an adapter
  */
-export function getAdapterBaseUrl(adapter: ResolvedAdapter, ctx?: { profile?: string }): string | null {
+export function getAdapterBaseUrl(adapter: ResolvedAdapter, ctx?: { profile?: string; config?: Record<string, unknown> }): string | null {
   // Static or dynamic baseUrl from adapter
   if (adapter.baseUrl) {
     if (typeof adapter.baseUrl === 'function') {
