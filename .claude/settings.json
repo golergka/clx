@@ -1,6 +1,5 @@
 {
   "enabledPlugins": {
-    "claude-mem@thedotmack": true,
-    "ralph-loop@claude-plugins-official": true
+    "claude-mem@thedotmack": true
   }
 }
