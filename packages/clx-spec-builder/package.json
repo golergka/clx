@@ -1,0 +1,40 @@
+{
+  "name": "clx-spec-builder",
+  "version": "0.1.0",
+  "description": "AI-powered OpenAPI spec generator for clx",
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "main": "dist/index.js",
+  "bin": {
+    "clx-spec-builder": "./dist/index.js"
+  },
+  "files": [
+    "dist/",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target node",
+    "dev": "bun run src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ai": "^4.3.15",
+    "@ai-sdk/google": "^1.2.17",
+    "@ai-sdk/anthropic": "^1.2.12",
+    "@ai-sdk/openai": "^1.3.22",
+    "@apidevtools/swagger-parser": "^10.1.1",
+    "commander": "^14.0.2",
+    "yaml": "^2.8.2",
+    "turndown": "^7.2.0",
+    "zod": "^3.25.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.27",
+    "@types/turndown": "^5.0.5",
+    "typescript": "^5.9.3"
+  }
+}
