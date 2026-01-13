@@ -1,6 +1,6 @@
 // Main agent implementation
 
-import { generateText, streamText, type CoreMessage } from 'ai';
+import { generateText, type CoreMessage } from 'ai';
 import { getModel, validateProviderConfig } from './providers/index.js';
 import {
   askUserTool,
@@ -12,11 +12,12 @@ import {
   createLintSpecTool,
   createCompleteTool,
 } from './tools/index.js';
-import type { SessionConfig, SessionState } from './types.js';
+import type { SessionConfig, SessionState, UsageStats } from './types.js';
 import * as path from 'path';
+import * as fs from 'fs/promises';
 import * as readline from 'readline';
 
-const SYSTEM_PROMPT = `You are an expert API documentation analyzer and OpenAPI spec generator. Your task is to create a complete, working OpenAPI specification and clx adapter for an API.
+const SYSTEM_PROMPT_NEW = `You are an expert API documentation analyzer and OpenAPI spec generator. Your task is to create a complete, working OpenAPI specification and clx adapter for an API.
 
 ## Your Goal
 Generate an OpenAPI 3.x spec and TypeScript adapter that allows clx to interact with the target API.
@@ -45,6 +46,12 @@ The adapter file should use defineAdapter() and include:
 - baseUrl: API base URL (can be static string or function)
 - auth: Authentication configuration (bearer, basic, apiKey, etc.)
 - help: Summary and example commands
+
+Optional but recommended (read existing adapters like src/specs/stripe.ts for examples):
+- pagination: Configure cursor/offset pagination if API supports it
+- errors: Custom error extraction from API responses
+- rateLimit: Rate limit headers and retry configuration
+- request.headers: Custom headers (API version, etc.)
 
 ## Example Adapter Structure
 \`\`\`typescript
@@ -82,6 +89,114 @@ API Name: {{API_NAME}}
 Display Name: {{DISPLAY_NAME}}
 Starting Documentation: {{DOCS_URLS}}
 `;
+
+const SYSTEM_PROMPT_MODIFY = `You are an expert API documentation analyzer and OpenAPI spec generator. Your task is to modify and improve an existing OpenAPI specification and clx adapter.
+
+## Your Goal
+Improve the existing OpenAPI 3.x spec and TypeScript adapter for the {{API_NAME}} API.
+
+## Existing Files
+- OpenAPI spec: registry/{{API_NAME}}/openapi.yaml
+- Adapter: src/specs/{{API_NAME}}.ts
+
+## Process
+1. First, read the existing spec and adapter to understand what's already implemented
+2. Explore the API documentation to find additional endpoints or improvements
+3. Modify the OpenAPI spec to add new endpoints or fix issues
+4. Update the adapter if needed (auth, pagination, error handling, etc.)
+5. Use lint_spec to validate your work
+6. Use api_call to test endpoints (ask user for credentials first!)
+7. Call complete when everything works
+
+## Guidelines
+- Preserve existing working endpoints unless explicitly asked to change them
+- Add new endpoints incrementally
+- Update the adapter's help examples if you add significant new functionality
+- Test both existing and new endpoints if possible
+
+## Current Session
+API Name: {{API_NAME}}
+Display Name: {{DISPLAY_NAME}}
+Documentation: {{DOCS_URLS}}
+Mode: MODIFY EXISTING
+`;
+
+async function checkExistingFiles(clxRoot: string, apiName: string): Promise<{ specExists: boolean; adapterExists: boolean }> {
+  const specPath = path.join(clxRoot, 'registry', apiName, 'openapi.yaml');
+  const adapterPath = path.join(clxRoot, 'src', 'specs', `${apiName}.ts`);
+
+  let specExists = false;
+  let adapterExists = false;
+
+  try {
+    await fs.access(specPath);
+    specExists = true;
+  } catch {}
+
+  try {
+    await fs.access(adapterPath);
+    adapterExists = true;
+  } catch {}
+
+  return { specExists, adapterExists };
+}
+
+function formatDuration(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes > 0) {
+    return `${minutes}m ${remainingSeconds}s`;
+  }
+  return `${seconds}s`;
+}
+
+// Pricing per 1M tokens (as of Jan 2025)
+const PRICING: Record<string, { input: number; output: number }> = {
+  google: { input: 0.075, output: 0.30 },      // Gemini 2.0 Flash
+  anthropic: { input: 3.00, output: 15.00 },   // Claude Sonnet
+  openai: { input: 2.50, output: 10.00 },      // GPT-4o
+};
+
+function calculateCost(provider: string, promptTokens: number, completionTokens: number): number {
+  const pricing = PRICING[provider] || PRICING.openai;
+  const inputCost = (promptTokens / 1_000_000) * pricing.input;
+  const outputCost = (completionTokens / 1_000_000) * pricing.output;
+  return inputCost + outputCost;
+}
+
+function printUsageSummary(state: SessionState): void {
+  const usage = state.usage;
+  usage.endTime = Date.now();
+  const duration = usage.endTime - usage.startTime;
+  const cost = calculateCost(state.config.provider, usage.promptTokens, usage.completionTokens);
+
+  console.log('\n' + '='.repeat(50));
+  console.log('SESSION SUMMARY');
+  console.log('='.repeat(50));
+  console.log(`Duration: ${formatDuration(duration)}`);
+  console.log(`Iterations: ${usage.iterations}`);
+  console.log(`Mode: ${state.existingSpec || state.existingAdapter ? 'Modify existing' : 'Create new'}`);
+  console.log('');
+  console.log('API Calls:');
+  console.log(`  Succeeded: ${state.apiCallsSucceeded}`);
+  console.log(`  Failed: ${state.apiCallsFailed}`);
+  console.log('');
+  console.log('Tool Usage:');
+  const sortedTools = Object.entries(usage.toolCalls).sort((a, b) => b[1] - a[1]);
+  for (const [tool, count] of sortedTools) {
+    console.log(`  ${tool}: ${count}`);
+  }
+  console.log(`  Total: ${usage.totalToolCalls}`);
+  console.log('');
+  console.log('Tokens:');
+  console.log(`  Prompt: ${usage.promptTokens.toLocaleString()}`);
+  console.log(`  Completion: ${usage.completionTokens.toLocaleString()}`);
+  console.log(`  Total: ${usage.totalTokens.toLocaleString()}`);
+  console.log('');
+  console.log(`Estimated Cost: $${cost.toFixed(4)} (${state.config.provider})`);
+  console.log('='.repeat(50));
+}
 
 async function promptForConfig(partialConfig: Partial<SessionConfig>): Promise<SessionConfig> {
   const rl = readline.createInterface({
@@ -129,10 +244,16 @@ export async function runAgent(partialConfig: Partial<SessionConfig>): Promise<v
   // Complete config with interactive prompts if needed
   const config = await promptForConfig(partialConfig);
 
+  // Check for existing files
+  const { specExists, adapterExists } = await checkExistingFiles(config.clxRoot, config.name);
+
   console.log('\n--- clx-spec-builder ---');
   console.log(`API: ${config.name} (${config.displayName})`);
   console.log(`Provider: ${config.provider}`);
   console.log(`Docs: ${config.docsUrls.join(', ') || '(none)'}`);
+  console.log(`Mode: ${specExists || adapterExists ? 'MODIFY EXISTING' : 'CREATE NEW'}`);
+  if (specExists) console.log(`  - Existing spec found`);
+  if (adapterExists) console.log(`  - Existing adapter found`);
   console.log('------------------------\n');
 
   // Validate provider config
@@ -143,6 +264,17 @@ export async function runAgent(partialConfig: Partial<SessionConfig>): Promise<v
     process.exit(1);
   }
 
+  // Initialize usage stats
+  const usage: UsageStats = {
+    startTime: Date.now(),
+    iterations: 0,
+    toolCalls: {},
+    totalToolCalls: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+  };
+
   // Initialize session state
   const state: SessionState = {
     config,
@@ -150,13 +282,17 @@ export async function runAgent(partialConfig: Partial<SessionConfig>): Promise<v
     apiCallsFailed: 0,
     specPath: null,
     adapterPath: null,
+    existingSpec: specExists,
+    existingAdapter: adapterExists,
+    usage,
   };
 
-  // Build system prompt
-  const systemPrompt = SYSTEM_PROMPT
-    .replace('{{API_NAME}}', config.name)
-    .replace('{{DISPLAY_NAME}}', config.displayName || config.name)
-    .replace('{{DOCS_URLS}}', config.docsUrls.join(', ') || '(none provided)');
+  // Build system prompt based on mode
+  const basePrompt = (specExists || adapterExists) ? SYSTEM_PROMPT_MODIFY : SYSTEM_PROMPT_NEW;
+  const systemPrompt = basePrompt
+    .replace(/\{\{API_NAME\}\}/g, config.name)
+    .replace(/\{\{DISPLAY_NAME\}\}/g, config.displayName || config.name)
+    .replace(/\{\{DOCS_URLS\}\}/g, config.docsUrls.join(', ') || '(none provided)');
 
   // Create tools
   const allowedDirs = [
@@ -178,15 +314,27 @@ export async function runAgent(partialConfig: Partial<SessionConfig>): Promise<v
   // Get model
   const model = getModel(config.provider);
 
+  // Build initial message based on mode
+  let initialMessage: string;
+  if (specExists || adapterExists) {
+    initialMessage = `Please review and improve the existing OpenAPI spec and adapter for the ${config.displayName || config.name} API. ${
+      config.docsUrls.length > 0
+        ? `Use the documentation at: ${config.docsUrls.join(', ')} to add more endpoints or fix any issues.`
+        : 'Search for documentation to find additional endpoints to add.'
+    }`;
+  } else {
+    initialMessage = `Please generate an OpenAPI spec and adapter for the ${config.displayName || config.name} API. ${
+      config.docsUrls.length > 0
+        ? `Start by reading the documentation at: ${config.docsUrls.join(', ')}`
+        : 'Start by searching for the API documentation.'
+    }`;
+  }
+
   // Conversation history
   const messages: CoreMessage[] = [
     {
       role: 'user',
-      content: `Please generate an OpenAPI spec and adapter for the ${config.displayName || config.name} API. ${
-        config.docsUrls.length > 0
-          ? `Start by reading the documentation at: ${config.docsUrls.join(', ')}`
-          : 'Start by searching for the API documentation.'
-      }`,
+      content: initialMessage,
     },
   ];
 
@@ -194,10 +342,9 @@ export async function runAgent(partialConfig: Partial<SessionConfig>): Promise<v
 
   // Main agent loop
   let maxIterations = 100;
-  let iteration = 0;
 
-  while (iteration < maxIterations) {
-    iteration++;
+  while (usage.iterations < maxIterations) {
+    usage.iterations++;
 
     try {
       const result = await generateText({
@@ -207,10 +354,12 @@ export async function runAgent(partialConfig: Partial<SessionConfig>): Promise<v
         tools,
         maxSteps: 10,
         onStepFinish: async (step) => {
-          // Log tool usage
+          // Track tool usage
           if (step.toolCalls && step.toolCalls.length > 0) {
             for (const call of step.toolCalls) {
               console.log(`[Tool: ${call.toolName}]`);
+              usage.toolCalls[call.toolName] = (usage.toolCalls[call.toolName] || 0) + 1;
+              usage.totalToolCalls++;
             }
           }
 
@@ -218,8 +367,25 @@ export async function runAgent(partialConfig: Partial<SessionConfig>): Promise<v
           if (step.text) {
             console.log(`\n${step.text}\n`);
           }
+
+          // Track token usage from step
+          if (step.usage) {
+            usage.promptTokens += step.usage.promptTokens || 0;
+            usage.completionTokens += step.usage.completionTokens || 0;
+            usage.totalTokens += (step.usage.promptTokens || 0) + (step.usage.completionTokens || 0);
+          }
         },
       });
+
+      // Track final token usage
+      if (result.usage) {
+        // Only add if not already tracked in steps
+        if (!result.steps || result.steps.length === 0) {
+          usage.promptTokens += result.usage.promptTokens || 0;
+          usage.completionTokens += result.usage.completionTokens || 0;
+          usage.totalTokens += result.usage.totalTokens || 0;
+        }
+      }
 
       // Add assistant response to history
       messages.push({
@@ -235,7 +401,7 @@ export async function runAgent(partialConfig: Partial<SessionConfig>): Promise<v
           console.log('\n=== Generation Complete ===');
           console.log(`Spec: ${(completeResult.result as any).files.spec}`);
           console.log(`Adapter: ${(completeResult.result as any).files.adapter}`);
-          console.log(`API calls: ${state.apiCallsSucceeded} succeeded, ${state.apiCallsFailed} failed`);
+          printUsageSummary(state);
           return;
         }
       }
@@ -257,6 +423,7 @@ export async function runAgent(partialConfig: Partial<SessionConfig>): Promise<v
 
         if (userInput.toLowerCase() === 'quit' || userInput.toLowerCase() === 'exit') {
           console.log('\n[Exiting...]');
+          printUsageSummary(state);
           return;
         }
 
@@ -277,4 +444,5 @@ export async function runAgent(partialConfig: Partial<SessionConfig>): Promise<v
   }
 
   console.log('\n[Max iterations reached. Exiting.]');
+  printUsageSummary(state);
 }
