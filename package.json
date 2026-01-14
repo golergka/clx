@@ -1,6 +1,6 @@
 {
   "name": "clx-cli",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "CLI API client generator from OpenAPI specs",
   "type": "module",
   "license": "AGPL-3.0-only",
