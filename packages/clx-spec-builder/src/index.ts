@@ -13,7 +13,7 @@ const program = new Command();
 program
   .name('clx-spec-builder')
   .description('AI-powered OpenAPI spec generator for clx')
-  .version('0.1.0')
+  .version('0.1.1')
   .option('-n, --name <name>', 'API name (e.g., betterstack)')
   .option('-d, --display-name <displayName>', 'Display name (e.g., "Better Stack")')
   .option('--docs <urls...>', 'Documentation URLs to start with')

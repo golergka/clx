@@ -1,6 +1,6 @@
 {
   "name": "clx-spec-builder",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AI-powered OpenAPI spec generator for clx",
   "type": "module",
   "license": "AGPL-3.0-only",
